@@ -16,10 +16,15 @@ Matchya is a portfolio-grade Streamlit app for ranking resumes with OpenAI-compa
    ```
 2. Run the app:
    ```bash
-   streamlit run app_requests.py
+   streamlit run app.py
    ```
    (Or `python start_app.py` to pick an open port automatically.)
 3. Open the Streamlit URL printed in the terminal.
+
+## Code structure
+- `app.py`: Streamlit UI orchestrator.
+- `matchya/`: production-style modules for LLM clients, intake, scoring, similarity, checkpoints, and text helpers.
+- `app_requests.py`: tiny shim for backward compatibility with the old entrypoint.
 
 ## LLM configuration
 - **OpenAI (cloud)**: select the provider, add your API key, and pick a model from the auto-fetched list.
