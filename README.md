@@ -85,8 +85,10 @@ Choose **one** intake mode (the inputs stay hidden until selected):
 - Use the cloud-links mode for large batches of public resumes; the uploader is ideal for handpicked files.
 - Treat the criteria table as weights: higher `weight` means a bigger influence on ranking, while `keywords` help the LLM stay on-topic.
 
-Enjoy faster, clearer hiring workflows with **🍵 Matchya**.
-
 ## Authors
 - Elizaveta Kalinina [@kittyygoo](https://github.com/kittyygoo)
 - Nikita Prudnikov [@prudnik-web](https://github.com/prudnik-web)
+
+---
+
+Enjoy faster, clearer hiring workflows with **🍵 Matchya**.
