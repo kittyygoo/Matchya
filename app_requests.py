@@ -469,6 +469,61 @@ class LLMClient:
         data = json.loads(content)
         return data.get("results", [])
 
+    def score_and_extract_single(
+        self,
+        resume: Dict[str, str],
+        role_desc: str,
+        criteria: List[Criterion],
+        job_title: str = "",
+    ) -> Dict[str, object]:
+        """Более надёжный однорезюмный вариант без батчинга."""
+
+        system = (
+            "Ты — ассистент HR. Тебе даётся одно резюме.\n"
+            "1) Извлеки специализацию: 'specialization_main' (до 80 символов) и до 3 альтернатив.\n"
+            "2) Извлеки ФИО кандидата в 'full_name' (если невозможно — оставь пустую строку).\n"
+            "3) Извлеки контакты: 'emails' и 'phones' (желательно в международном формате).\n"
+            "4) Оцени по критериям 0..5 и дай краткие пояснения по каждому критерию.\n"
+            "Возвращай JSON строго по схеме."
+        )
+
+        payload = {
+            "role_title": job_title,
+            "role_description": role_desc,
+            "criteria": [c.model_dump() for c in criteria],
+            "resume": {"id": resume["id"], "text": resume["text"][:18000]},
+        }
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "full_name": {"type": "string"},
+                "specialization_main": {"type": "string"},
+                "specialization_alt": {"type": "array", "items": {"type": "string"}},
+                "emails": {"type": "array", "items": {"type": "string"}},
+                "phones": {"type": "array", "items": {"type": "string"}},
+                "scores": {"type": "object", "additionalProperties": {"type": "number"}},
+                "reasoning": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            "required": ["id", "specialization_main", "emails", "phones", "scores"],
+            "additionalProperties": False,
+        }
+
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_schema", "json_schema": {"name": "ResumeSingle", "schema": schema}},
+            temperature=0.1,
+        )
+
+        content = resp.choices[0].message.content
+        data = json.loads(content)
+        return data
+
     def suggest_criteria(self, role_desc: str, job_title: str = "", max_items: int = 10) -> List[Criterion]:
         """Генерация набора критериев/навыков под описание роли."""
         prompt = {
@@ -936,92 +991,80 @@ if run:
     # -------- Сброс прогресса перед батчами --------
     progress_bar.progress(0.0)
 
-    # -------- Pass 2: LLM батчи (до 5 резюме на запрос) --------
-    batches = list(chunks(parsed_items, 5))
-    num_batches = len(batches)
-    for bi, batch in enumerate(batches, start=1):
-        status.text(f"LLM батч {bi}/{num_batches}: {batch[0]['name']} (+{len(batch)-1} ещё)")
-        need_call = False
-        batch_payload = []
-        for it in batch:
-            if "pack" not in cache.get(it["fh"], {}):
-                need_call = True
-                batch_payload.append({"id": it["fh"], "text": it["text"]})
+    # -------- Pass 2: LLM — однорезюмный безопасный проход --------
+    total_llm = len(parsed_items)
+    for idx, it in enumerate(parsed_items, start=1):
+        status.text(f"LLM {idx}/{total_llm}: {it['name']}")
 
-        if need_call and batch_payload:
+        if "pack" not in cache.get(it["fh"], {}):
             try:
-                packs = client.score_and_extract_batch(
-                    resumes=batch_payload,
+                pack = client.score_and_extract_single(
+                    resume={"id": it["fh"], "text": it["text"]},
                     role_desc=role_desc or job_title,
                     criteria=criteria,
-                    job_title=job_title
+                    job_title=job_title,
                 )
             except Exception as e:
-                st.error(f"Ошибка LLM на батче {bi}/{num_batches}: {e}")
-                packs = []
+                st.error(f"Ошибка LLM на {it['name']}: {e}")
+                pack = {}
 
-            by_id = {p["id"]: p for p in packs}
-            for it in batch:
-                obj = cache.get(it["fh"], {})
-                if it["fh"] in by_id:
-                    obj["pack"] = by_id[it["fh"]]
-                else:
-                    obj["pack"] = {
-                        "id": it["fh"],
-                        "full_name": "",
-                        "specialization_main": "",
-                        "specialization_alt": [],
-                        "emails": [],
-                        "phones": [],
-                        "scores": {},
-                        "reasoning": {},
-                    }
-                cache[it["fh"]] = obj
-                append_checkpoint(cp_path, it["fh"], obj)
+            obj = cache.get(it["fh"], {})
+            obj["pack"] = {
+                "id": it["fh"],
+                "full_name": "",
+                "specialization_main": "",
+                "specialization_alt": [],
+                "emails": [],
+                "phones": [],
+                "scores": {},
+                "reasoning": {},
+                **(pack or {}),
+            }
+            cache[it["fh"]] = obj
+            append_checkpoint(cp_path, it["fh"], obj)
 
         # сбор строк (ФИО — из LLM, если оно есть; приоритетным подсказкам из Excel даём второй шанс)
-        for it in batch:
-            cobj = cache[it["fh"]]["pack"]
-            text = it["text"]
+        cobj = cache[it["fh"]]["pack"]
+        text = it["text"]
 
-            emails_all = list(cobj.get("emails") or []) or EMAIL_RE.findall(text)
-            phones_all = list(cobj.get("phones") or []) or PHONE_CAND_RE.findall(text)
-            email_final = emails_all[0] if emails_all else ""
-            phone_final = best_phone(phones_all)
+        emails_all = list(cobj.get("emails") or []) or EMAIL_RE.findall(text)
+        phones_all = list(cobj.get("phones") or []) or PHONE_CAND_RE.findall(text)
+        email_final = emails_all[0] if emails_all else ""
+        phone_final = best_phone(phones_all)
 
-            fio_llm = (cobj.get("full_name") or "").strip()
-            fio_excel = (it.get("excel_fio") or "").strip()
-            # Приоритет: LLM -> Excel -> эвристика
-            fio_val = fio_llm if fio_llm else (fio_excel if fio_excel else guess_fio(text))
+        fio_llm = (cobj.get("full_name") or "").strip()
+        fio_excel = (it.get("excel_fio") or "").strip()
+        # Приоритет: LLM -> Excel -> эвристика
+        fio_val = fio_llm if fio_llm else (fio_excel if fio_excel else guess_fio(text))
 
-            specialization = (cobj.get("specialization_main") or "").strip()
-            if not specialization:
-                lines = [l.strip() for l in text.splitlines() if l.strip()][:20]
-                for l in lines[:15]:
-                    if "@" in l or re.search(r"https?://", l): continue
-                    if EMAIL_RE.search(l) or PHONE_CAND_RE.search(l): continue
-                    if len(l) <= 140 and (l.istitle() or re.search(r"[A-Za-zА-Яа-я ]{6,}", l)):
-                        specialization = l; break
+        specialization = (cobj.get("specialization_main") or "").strip()
+        if not specialization:
+            lines = [l.strip() for l in text.splitlines() if l.strip()][:20]
+            for l in lines[:15]:
+                if "@" in l or re.search(r"https?://", l): continue
+                if EMAIL_RE.search(l) or PHONE_CAND_RE.search(l): continue
+                if len(l) <= 140 and (l.istitle() or re.search(r"[A-Za-zА-Яа-я ]{6,}", l)):
+                    specialization = l; break
 
-            score_map = {k: float(cobj.get("scores", {}).get(k, 0.0)) for k in [c.name for c in criteria]}
-            base = {
-                "Файл": it["name"],
-                "ФИО": fio_val,
-                "Специализация": specialization,
-                "Email": email_final,
-                "Phone": phone_final,
-                "FullText": text,
-                "SourceURL": it.get("url", ""),
-                "_FileHash": it["fh"], "_TextHash": it["th"],
-                "_Reasoning": cobj.get("reasoning", {}),
-            }
-            for c in criteria:
-                base[f"{c.name} (0-5)"] = score_map.get(c.name, 0.0)
+        score_map = {k: float(cobj.get("scores", {}).get(k, 0.0)) for k in [c.name for c in criteria]}
+        base = {
+            "Файл": it["name"],
+            "ФИО": fio_val,
+            "Специализация": specialization,
+            "Email": email_final,
+            "Phone": phone_final,
+            "FullText": text,
+            "SourceURL": it.get("url", ""),
+            "_FileHash": it["fh"], "_TextHash": it["th"],
+            "_Reasoning": cobj.get("reasoning", {}),
+        }
+        for c in criteria:
+            base[f"{c.name} (0-5)"] = score_map.get(c.name, 0.0)
 
-            rows.append(base)
-            texts.append(text); filenames.append(it["name"])
+        rows.append(base)
+        texts.append(text); filenames.append(it["name"])
 
-        progress_bar.progress(bi/num_batches)
+        progress_bar.progress(idx/total_llm)
 
     if not rows:
         st.warning("Нет успешных результатов после LLM"); st.stop()
@@ -1095,12 +1138,12 @@ if run:
 
     logic_text = (
         "Как считалось:\n"
-        "• LLM выставляет баллы 0–5 по вашим критериям и даёт пояснения (ФИО НЕ берётся из LLM).\n"
-        "• ФИО берётся из XLSX с ссылками; при отсутствии — простой фолбэк из текста.\n"
+        "• LLM ставит баллы 0–5 по вашим критериям и даёт пояснения — по одному резюме на запрос, чтобы модели не путали контекст.\n"
+        "• ФИО берётся из LLM, при пустом — из XLSX, дальше простой фолбэк по тексту.\n"
         "• В каждый запрос уходит описание роли и JSON с навыками/весами — оценки опираются на этот контекст.\n"
         "• Композит = 0.75×взвешенные перцентили + 0.25×покрытие.\n"
         "• Дубликаты: одинаковые файлы/тексты, одинаковые email/телефоны удаляются; Similarity ≥ порога помечается как риск.\n"
-        "• Комментарий содержит ФИО/специализацию (ФИО берём из LLM, если оно есть), топ-3 сильных с выдержками, пробелы (низкие баллы) и риски."
+        "• Комментарий содержит ФИО/специализацию, топ-3 сильных с выдержками, пробелы (низкие баллы) и риски."
     )
     config_df = pd.DataFrame({
         "Key":[
@@ -1109,7 +1152,7 @@ if run:
         ],
         "Value":[
             model_name, job_title, str(dup_threshold), cp_path,
-            str(len(files) + len(link_rows)), str(len(parsed_items)), "5", str(len(list(chunks(parsed_items, 5)))), logic_text
+            str(len(files) + len(link_rows)), str(len(parsed_items)), "1 (no batching)", str(len(parsed_items)), logic_text
         ]
     })
 

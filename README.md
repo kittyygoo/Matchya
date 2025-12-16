@@ -1,12 +1,12 @@
 # HR Assistant — resume ranking toolkit
 
-A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-duplication, and a polished Excel export. The code is structured to be portfolio-ready and easy to extend. Added OpenRouter support, live model pickers, and mandatory role context with AI-generated skill weights.
+A pragmatic Streamlit app that prioritises CVs with an LLM, smart de-duplication, and a polished Excel export. The code is structured to be portfolio-ready and easy to extend. Added OpenRouter support, live model pickers, and mandatory role context with AI-generated skill weights.
 
 ## Highlights (EN)
 - **Flexible LLMs**: OpenAI, OpenRouter, local **LM Studio**, or any custom OpenAI-compatible base URL — model lists are auto-fetched per provider (LM Studio works with `http://localhost:1234` _or_ `http://localhost:1234/v1`).
 - **Mandatory context**: role description + key skills with weights are required; click “⚡️ Generate” to auto-build skills/keywords from the description.
 - **Multiple intake paths**: upload local files, point to a server directory (even without uploads), or feed an Excel file with links (plus optional names).
-- **Batch-grade scoring**: one request per batch (up to 5 CVs) with role context and weighted criteria.
+- **Interference-proof scoring**: one request per resume (no batching) with role context and weighted criteria, so models don’t mix candidates.
 - **Human-readable output**: tidy XLSX with borders, conditional formatting, priority buckets, and a commentary column.
 - **Resilience**: hashing-based checkpoints, duplicate pruning by hash/contacts/similarity, and graceful fallbacks for names.
 
@@ -42,13 +42,13 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 
 # HR Assistant — ранжирование резюме
 
-Портфолио-готовое приложение на Streamlit: один LLM-запрос на батч резюме, аккуратный XLSX и продуманная дедупликация. Теперь есть OpenRouter, авто-выбор моделей и обязательный контекст вакансии с AI-генерацией навыков.
+Портфолио-готовое приложение на Streamlit: LLM-оценка резюме, аккуратный XLSX и продуманная дедупликация. Теперь есть OpenRouter, авто-выбор моделей и обязательный контекст вакансии с AI-генерацией навыков.
 
 ## Ключевые плюсы (RU)
 - **Гибкие модели**: OpenAI, OpenRouter, локальный **LM Studio** или любой OpenAI-совместимый endpoint; список моделей тянется через API (LM Studio понимает и `http://localhost:1234`, и `http://localhost:1234/v1`).
 - **Любые источники резюме**: загрузка файлов, чтение с сервера из директории (даже без загрузок), либо XLSX со ссылками и ФИО.
 - **LLM парсит ФИО и контакты**: имя подтягиваем из модели, но при необходимости дополняем подсказками из XLSX или локальной эвристикой.
-- **Оценка за раз**: до 5 резюме в одном запросе, критерии с весами и контекст вакансии; кнопку “⚡️ Сгенерировать” можно нажать, чтобы собрать навыки из описания.
+- **Без смешения**: один запрос = одно резюме, критерии с весами и контекст вакансии; кнопку “⚡️ Сгенерировать” можно нажать, чтобы собрать навыки из описания.
 - **Красивый экспорт**: форматирование, data bars, приоритетные бакеты, поясняющие комментарии.
 - **Надёжность**: чекпоинты по SHA-1, фильтрация дубликатов по хешам/контактам/похожести, фолбэки для ФИО (если модель не уверена).
 
