@@ -59,6 +59,13 @@ EXT_GUESS_FALLBACK = [".pdf", ".docx", ".txt", ".rtf", ".md"]
 MAX_DOWNLOAD_MB = 25
 REQ_TIMEOUT = 30
 
+DEFAULT_MODEL_CHOICES = {
+    "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
+    "openrouter": ["openrouter/auto", "anthropic/claude-3.5-sonnet", "openai/gpt-4o-mini"],
+    "lmstudio": ["lmstudio-community/gpt-4o-mini-gguf", "lmstudio-community/llama-3.1-8b-instruct"],
+    "custom": ["gpt-4o-mini"],
+}
+
 # --- эвристика для ФИО (фолбэк, если нет в XLSX) ---
 FIO_RE = re.compile(r"\b[А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+(?: [А-ЯЁ][а-яё]+)?\b")
 
@@ -192,6 +199,48 @@ def guess_filename_from_headers(url: str, resp: requests.Response) -> str:
     base = os.path.basename(path) or "download"
     return base
 
+
+def _safe_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Dict:
+    resp = requests.get(url, headers=headers or {}, timeout=REQ_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@st.cache_data(show_spinner=False)
+def fetch_provider_models(provider: str, api_key: str = "", base_url: str = "") -> List[str]:
+    """Подтягиваем список моделей для UI (если не получилось — отдаём дефолт)."""
+    provider = (provider or "").strip().lower()
+    if provider not in DEFAULT_MODEL_CHOICES:
+        return DEFAULT_MODEL_CHOICES["openai"]
+
+    try:
+        if provider == "openai" and api_key.strip():
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key.strip())
+            models = client.models.list().data
+            ids = sorted({m.id for m in models if getattr(m, "id", "")})
+            if ids:
+                return ids
+        elif provider == "openrouter" and api_key.strip():
+            data = _safe_get_json(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {api_key.strip()}"},
+            )
+            ids = sorted({m.get("id", "") for m in data.get("data", []) if m.get("id")})
+            if ids:
+                return ids
+        elif provider == "lmstudio":
+            url = (base_url or "http://localhost:1234/v1").rstrip("/") + "/models"
+            data = _safe_get_json(url)
+            ids = sorted({m.get("id", "") for m in data.get("data", []) if m.get("id")})
+            if ids:
+                return ids
+    except Exception as exc:
+        st.warning(f"Не удалось подтянуть модели {provider}: {exc}")
+
+    return DEFAULT_MODEL_CHOICES[provider]
+
 def ensure_allowed_extension(filename: str, content_type: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext in ALLOWED_EXT:
@@ -224,6 +273,31 @@ def stream_download(url: str) -> Tuple[str, bytes, str]:
         fname = guess_filename_from_headers(url, r)
         fname = ensure_allowed_extension(fname, r.headers.get("Content-Type",""))
         return fname, data, r.headers.get("Content-Type","")
+
+
+def collect_local_directory(dir_path: str, recursive: bool = False) -> List[Dict[str, object]]:
+    """Сканирует локальную директорию на сервере и отдаёт файлы в нужной нам структуре."""
+    dir_path = (dir_path or "").strip()
+    if not dir_path:
+        return []
+    if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
+        raise FileNotFoundError(f"{dir_path} не существует или не является директорией")
+
+    items: List[Dict[str, object]] = []
+    walker = os.walk(dir_path) if recursive else [(dir_path, [], os.listdir(dir_path))]
+    for root, _, files in walker:
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in ALLOWED_EXT:
+                continue
+            full_path = os.path.join(root, fname)
+            try:
+                with open(full_path, "rb") as f:
+                    b = f.read()
+                items.append({"kind": "file", "name": fname, "bytes": b, "source_path": full_path})
+            except Exception as exc:  # пишем по-человечески, потому что это реальные логи
+                print(f"[dir-scan] {full_path}: {exc}")
+    return items
 
 def extract_links_from_excel(xlsx_bytes: bytes, url_column_hint: str = "", fio_column_hint: str = "") -> List[Dict[str, str]]:
     df = pd.read_excel(io.BytesIO(xlsx_bytes), engine="openpyxl")
@@ -288,10 +362,23 @@ def extract_links_from_excel(xlsx_bytes: bytes, url_column_hint: str = "", fio_c
     return rows
 
 # ---------- LLM ----------
-class OpenAIClientWrapper:
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+class LLMClient:
+    """Небольшой тонкий слой над OpenAI-совместимыми LLM.
+
+    Работает и с облачным OpenAI, OpenRouter, и с локальным LM Studio (или
+    любыми API, говорящими на совместимом протоколе). Простой и без магии —
+    чтобы при отладке было понятно, что именно отправляется в модель.
+    """
+
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini", base_url: str = "", extra_headers: Optional[Dict[str,str]] = None):
         from openai import OpenAI
-        self.client = OpenAI(api_key=api_key)
+
+        client_opts = {"api_key": api_key}
+        if base_url:
+            client_opts["base_url"] = base_url
+        if extra_headers:
+            client_opts["default_headers"] = extra_headers
+        self.client = OpenAI(**client_opts)
         self.model = model
 
     def score_and_extract_batch(
@@ -299,7 +386,7 @@ class OpenAIClientWrapper:
         resumes: List[Dict[str, str]],
         role_desc: str,
         criteria: List[Criterion],
-        job_title: str = ""
+        job_title: str = "",
     ) -> List[Dict[str, object]]:
         """
         Один вызов на партию до 5 резюме.
@@ -369,6 +456,87 @@ class OpenAIClientWrapper:
         content = resp.choices[0].message.content
         data = json.loads(content)
         return data.get("results", [])
+
+    def suggest_criteria(self, role_desc: str, job_title: str = "", max_items: int = 10) -> List[Criterion]:
+        """Генерация набора критериев/навыков под описание роли."""
+        prompt = {
+            "role_title": job_title,
+            "role_description": role_desc,
+            "format": "json",
+            "max_items": max_items,
+        }
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты карьерный эксперт. По описанию вакансии верни до 10 ключевых критериев/навыков. "
+                        "Каждый критерий: name, weight (0.5..3.0, выше для must-have), keywords (3-6 штук)."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "Criteria", "schema": {
+                        "type": "object",
+                        "properties": {
+                            "criteria": {
+                                "type": "array",
+                                "maxItems": max_items,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "weight": {"type": "number"},
+                                        "keywords": {"type": "array", "items": {"type": "string"}},
+                                    },
+                                    "required": ["name", "weight"],
+                                    "additionalProperties": False,
+                                },
+                            }
+                        },
+                        "required": ["criteria"],
+                        "additionalProperties": False,
+                    }
+                }
+            },
+            temperature=0.2,
+        )
+        raw = json.loads(resp.choices[0].message.content)
+        out = []
+        for item in raw.get("criteria", []):
+            try:
+                out.append(Criterion(**item))
+            except Exception:
+                continue
+        return out
+
+
+def create_llm_client(provider: str, api_key: str, model: str, custom_base_url: str = "") -> LLMClient:
+    provider = (provider or "openai").lower()
+    if provider == "lmstudio":
+        base_url = custom_base_url.strip() or "http://localhost:1234/v1"
+        key = api_key.strip() or "lm-studio"
+        return LLMClient(api_key=key, model=model, base_url=base_url)
+    if provider == "openrouter":
+        key = api_key.strip()
+        if not key:
+            raise ValueError("Нужен API Key OpenRouter")
+        headers = {
+            "HTTP-Referer": "https://github.com/user/portfolio",  # хорошие манеры для OpenRouter
+            "X-Title": "Resume ranker",
+        }
+        return LLMClient(api_key=key, model=model, base_url="https://openrouter.ai/api/v1", extra_headers=headers)
+    if provider == "custom":
+        base_url = custom_base_url.strip()
+        if not base_url:
+            raise ValueError("Укажите base_url для кастомного провайдера")
+        key = api_key.strip() or "token-placeholder"
+        return LLMClient(api_key=key, model=model, base_url=base_url)
+    return LLMClient(api_key=api_key.strip(), model=model)
 
 # ---------- Similarity ----------
 def max_similarities(texts: List[str], names: List[str]) -> Tuple[List[float], List[str], pd.DataFrame]:
@@ -494,27 +662,91 @@ st.caption("Lola, Liza & Partners LLC — serious screening for massive resume b
 
 with st.sidebar:
     st.header("⚙️ LLM")
-    api_key = st.text_input("OpenAI API Key", type="password")
-    model_name = st.selectbox("Модель", ["gpt-4o-mini","gpt-4o","gpt-4.1-mini"], index=0)
+    provider = st.selectbox(
+        "Провайдер LLM",
+        ["openai", "openrouter", "lmstudio", "custom"],
+        format_func=lambda x: {
+            "openai": "OpenAI (облако)",
+            "openrouter": "OpenRouter (облако)",
+            "lmstudio": "LM Studio (локально)",
+            "custom": "Custom base_url",
+        }[x],
+    )
+    api_key = st.text_input(
+        "API Key",
+        type="password",
+        help="Для LM Studio можно оставить пустым — тогда возьмём 'lm-studio' по умолчанию.",
+    )
+    default_lm_url = "http://localhost:1234/v1"
+    custom_base_url = ""
+    if provider in {"lmstudio", "custom"}:
+        custom_base_url = st.text_input(
+            "Base URL (LM Studio/custom)",
+            value=default_lm_url if provider == "lmstudio" else "",
+            help="OpenAI-совместимый endpoint. Для LM Studio стандартный порт — 1234.",
+        )
+    model_options = fetch_provider_models(provider, api_key, custom_base_url)
+    model_name = st.selectbox("Модель", model_options, index=0)
 
     st.header("📌 Роль/критерии")
     job_title = st.text_input("Название роли (опц.)", value="")
-    role_desc = st.text_area("Описание роли/вакансии", height=120)
+    role_desc = st.text_area("Описание роли/вакансии (обязательно)", height=140)
 
-    st.subheader("Критерии (JSON)")
+    st.subheader("Ключевые навыки/критерии (обязательно)")
     default_criteria = [
-        {"name": "Релевантность опыту", "weight": 2.0, "keywords": []},
-        {"name": "Достижения/результаты", "weight": 1.6, "keywords": []},
-        {"name": "Навыки по роли", "weight": 1.8, "keywords": []},
-        {"name": "Коммуникация/переговоры", "weight": 1.2, "keywords": []},
-        {"name": "Образование/сертификаты", "weight": 0.8, "keywords": []},
+        {"name": "Опыт в домене", "weight": 2.0, "keywords": ["опыт", "профиль"]},
+        {"name": "Hard skills", "weight": 1.8, "keywords": ["stack", "технологии"]},
+        {"name": "Soft skills", "weight": 1.2, "keywords": ["коммуникация", "командная работа"]},
+        {"name": "Достижения", "weight": 1.4, "keywords": ["результаты", "impact"]},
     ]
-    crit_json = st.text_area("Список критериев", value=json.dumps(default_criteria, ensure_ascii=False, indent=2), height=220)
+    crit_state_key = "criteria_json"
+    if crit_state_key not in st.session_state:
+        st.session_state[crit_state_key] = json.dumps(default_criteria, ensure_ascii=False, indent=2)
+
+    crit_cols = st.columns([3, 1])
+    crit_json = crit_cols[0].text_area(
+        "Список навыков/критериев (JSON)",
+        key=crit_state_key,
+        height=240,
+        help="Каждый объект: name, weight, keywords[]. Вес — важность критерия."
+    )
+
+    def _generate_criteria():
+        if not role_desc.strip():
+            st.error("Сначала добавьте описание роли — по нему будем генерировать навыки")
+            return
+        try:
+            generator_client = create_llm_client(provider, api_key, model_name, custom_base_url)
+            generated = generator_client.suggest_criteria(role_desc, job_title)
+            if not generated:
+                st.warning("LLM не вернул навыки. Заполните вручную.")
+                return
+            st.session_state[crit_state_key] = json.dumps(
+                [c.model_dump() for c in generated],
+                ensure_ascii=False,
+                indent=2,
+            )
+            st.success("Навыки сгенерированы и подставлены ниже")
+        except Exception as e:
+            st.error(f"Не удалось сгенерировать навыки: {e}")
+
+    with crit_cols[1]:
+        st.markdown(" ")
+        st.markdown(" ")
+        if st.button("⚡️ Сгенерировать навыки", use_container_width=True):
+            _generate_criteria()
+
     criteria: List[Criterion] = []
     try:
         criteria = [Criterion(**c) for c in json.loads(crit_json)]
     except Exception as e:
         st.error(f"Ошибка критериев: {e}")
+
+    if criteria:
+        weights_df = pd.DataFrame(
+            [{"Критерий": c.name, "Вес": c.weight, "Ключевые слова": ", ".join(c.keywords)} for c in criteria]
+        )
+        st.dataframe(weights_df, hide_index=True, use_container_width=True)
 
     st.subheader("Дубликаты")
     dup_threshold = st.slider("Порог похожести (риск дубликата)", min_value=70, max_value=100, value=90, step=1)
@@ -547,16 +779,39 @@ with col_x_b:
 with col_x_c:
     xlsx_fio_column_hint = st.text_input("Колонка с ФИО (опц.)", value="")
 
+st.markdown("#### Или подхватите резюме из директории на сервере")
+col_dir_a, col_dir_b = st.columns([2,1])
+with col_dir_a:
+    local_dir_path = st.text_input("Путь к директории (опц.)", value="")
+with col_dir_b:
+    local_dir_recursive = st.checkbox("С подпапками", value=False)
+
 run = st.button("🚀 Обработать и выгрузить XLSX")
 
 # ---------- Main ----------
 if run:
-    if not api_key: st.error("Укажите OpenAI API Key"); st.stop()
+    if provider == "openai" and not api_key:
+        st.error("Укажите OpenAI API Key")
+        st.stop()
+    if provider == "openrouter" and not api_key:
+        st.error("Укажите OpenRouter API Key")
+        st.stop()
+    if provider == "custom" and not custom_base_url.strip():
+        st.error("Для кастомного провайдера нужен base_url")
+        st.stop()
+    if not role_desc.strip():
+        st.error("Описание роли обязательно: добавьте краткий текст вакансию/контекст")
+        st.stop()
     if not criteria: st.error("Задайте валидные критерии"); st.stop()
-    if not files and not xlsx_file:
-        st.error("Загрузите файлы или XLSX со ссылками"); st.stop()
+    if not (files or xlsx_file or local_dir_path.strip()):
+        st.error("Добавьте файлы, XLSX со ссылками или директорию на сервере")
+        st.stop()
 
-    client = OpenAIClientWrapper(api_key=api_key, model=model_name)
+    try:
+        client = create_llm_client(provider, api_key, model_name, custom_base_url)
+    except Exception as e:
+        st.error(f"LLM клиент не собрался: {e}")
+        st.stop()
     cache = load_checkpoint(cp_path) if resume_from_cp else {}
 
     rows: List[Dict] = []
@@ -567,7 +822,7 @@ if run:
     # Источники
     incoming_items = []  # {"kind":"file"|"url", "name":..., "bytes":..., "url"?:..., "content_type"?:..., "excel_fio"?:...}
 
-    # 1) локальные файлы
+    # 1) локальные файлы, загруженные через UI
     for f in (files or []):
         try:
             b = f.getvalue()
@@ -575,7 +830,19 @@ if run:
         except Exception as e:
             st.error(f"{f.name}: не удалось прочитать — {e}")
 
-    # 2) XLSX со ссылками (+ФИО из файла)
+    # 2) локальная директория на сервере (опционально)
+    if local_dir_path.strip():
+        try:
+            dir_items = collect_local_directory(local_dir_path, recursive=local_dir_recursive)
+            incoming_items.extend(dir_items)
+            if dir_items:
+                st.success(f"Из директории добавлено {len(dir_items)} файлов")
+            else:
+                st.info("В директории не найдено файлов поддерживаемых форматов")
+        except Exception as e:
+            st.error(f"Директория {local_dir_path}: {e}")
+
+    # 3) XLSX со ссылками (+ФИО из файла)
     link_rows: List[Dict[str,str]] = []
     if xlsx_file is not None:
         try:
@@ -813,6 +1080,7 @@ if run:
         "Как считалось:\n"
         "• LLM выставляет баллы 0–5 по вашим критериям и даёт пояснения (ФИО НЕ берётся из LLM).\n"
         "• ФИО берётся из XLSX с ссылками; при отсутствии — простой фолбэк из текста.\n"
+        "• В каждый запрос уходит описание роли и JSON с навыками/весами — оценки опираются на этот контекст.\n"
         "• Композит = 0.75×взвешенные перцентили + 0.25×покрытие.\n"
         "• Дубликаты: одинаковые файлы/тексты, одинаковые email/телефоны удаляются; Similarity ≥ порога помечается как риск.\n"
         "• Комментарий содержит ФИО/специализацию, топ-3 сильных с выдержками, пробелы (низкие баллы) и риски."
