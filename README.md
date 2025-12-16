@@ -5,9 +5,9 @@ Need to process 10 or 100 or even 1,000 résumés? Save your time—press a coup
 
 ## Easy-to-get output
 ---
-![Abstract](examples/Screenshot 2025-12-16 at 22.34.57.png)
+![Abstract](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2022.34.57.png)
 ---
-![Detailed](examples/Screenshot 2025-12-16 at 22.35.42.png)
+![Detailed](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2022.35.42.png)
 
 ## Why Matchya
 - ⏱️ **Time efficiency** — Instead of manual screening or blunt keyword filtering, delegate candidate selection to Matchya. Focus only on high-quality candidates that truly fit.
