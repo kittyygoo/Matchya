@@ -4,6 +4,7 @@
 Need to process 10 or 100 or even 1,000 résumés? Save your time—press a couple of buttons and get an unbiased, easy-to-read result.
 
 ## Easy-to-get output
+
 ---
 ![Abstract](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2022.34.57.png)
 See? All candidates were graded and sorted—for you to easily process the top ones.
@@ -23,6 +24,7 @@ Just zoomed version for you to see what is going on.
 - 🤑 **Cost savings** — Processing 10, 100, or 1,000 résumés with Matchya costs up to 10× less than manual work.
 
 ## UI
+
 ---
 ![pic](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2023.52.31.png)
 ---
