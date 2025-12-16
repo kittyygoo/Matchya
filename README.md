@@ -88,5 +88,5 @@ Choose **one** intake mode (the inputs stay hidden until selected):
 Enjoy faster, clearer hiring workflows with **🍵 Matchya**.
 
 ## Authors
-- Liza Kalinina [@kittyygoo](https://github.com/kittyygoo)
+- Elizaveta Kalinina [@kittyygoo](https://github.com/kittyygoo)
 - Nikita Prudnikov [@prudnik-web](https://github.com/prudnik-web)
