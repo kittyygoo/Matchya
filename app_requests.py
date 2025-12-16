@@ -1,25 +1,25 @@
 """
-🗑️ clean_the_garbage.exe — Resume Ranker (Ultimate v5+)
-Company: Lola, Liza & Partners LLC
+🍵 Matchya — Resume Ranker (portfolio-ready)
 
-Функции:
-- LLM (OpenAI, по умолчанию gpt-4o-mini) извлекает специализацию, ФИО (+альтернативы по специализациям), контакты,
-  оценивает по критериям 0–5 и даёт краткие пояснения — ВСЁ за один батч-запрос (до 5 резюме).
-- Устойчивый композитный скоринг: 0.75*wP(перцентили) + 0.25*Coverage.
-- Жёсткая дедупликация: одинаковые файлы/тексты, одинаковые email/телефоны, Similarity >= порога (100% — всегда дубликат).
-- Выгрузка ТОЛЬКО в XLSX. Бордеры, жирные заголовки, шкалы, подсветка строк по бакетам/рискам.
-- Чекпоинт JSONL по sha1 от байтов — безопасное возобновление.
-- Источники: локальные файлы (PDF/DOCX/TXT/MD/RTF) + XLSX с ссылками (поддерживаются прямые ссылки на PDF/DOCX/RTF/TXT и HTML-страницы).
+Features:
+- OpenAI-compatible LLMs (OpenAI, OpenRouter, LM Studio, custom) extract the main role, full name, contacts, and scores per
+  criterion with concise reasoning — one request per resume for reliability.
+- Robust composite scoring: 0.75×weighted percentiles + 0.25×coverage.
+- Strong deduplication: same files/texts, same emails/phones, and near-duplicates by similarity threshold.
+- Export to XLSX with styling, duplicate risk highlights, and similarity pairs for audits.
+- JSONL checkpointing by SHA1 for safe resumability.
+- Sources: uploaded files or direct cloud links to resume files (PDF/DOCX/TXT/MD/RTF/HTML).
 
-Установка:
+Quick start:
     pip install streamlit pdfminer.six python-docx rapidfuzz pandas openpyxl pydantic tenacity openai requests beautifulsoup4 lxml
 
-Запуск:
-    streamlit run app.py
+Run:
+    streamlit run app_requests.py
 """
 
 from __future__ import annotations
 import io, os, re, json, hashlib, urllib.parse
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
@@ -65,15 +65,40 @@ DEFAULT_MODEL_CHOICES = {
     "custom": ["gpt-4o-mini"],
 }
 
-# --- эвристика для ФИО (фолбэк, если нет в XLSX) ---
-FIO_RE = re.compile(r"\b[А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+(?: [А-ЯЁ][а-яё]+)?\b")
+# --- simple full-name heuristic (fallback when LLM is empty) ---
+NAME_RE = re.compile(r"\b[A-Z][a-z]+ [A-Z][a-z]+(?: [A-Z][a-z]+)?\b")
 
-def guess_fio(text: str) -> str:
+
+@dataclass
+class LLMSettings:
+    provider: str
+    api_key: str
+    model: str
+    base_url: str = ""
+    headers: Optional[Dict[str, str]] = None
+
+
+@dataclass
+class RoleContext:
+    description: str
+    criteria: List[Criterion]
+
+
+@dataclass
+class ResumeArtifact:
+    id: str
+    file_hash: str
+    text_hash: str
+    name: str
+    text: str
+    url: str = ""
+
+def guess_full_name(text: str) -> str:
     lines = [l.strip() for l in text.splitlines() if l.strip()][:30]
     for l in lines:
         if EMAIL_RE.search(l) or PHONE_CAND_RE.search(l) or "http" in l.lower():
             continue
-        m = FIO_RE.search(l)
+        m = NAME_RE.search(l)
         if m:
             return m.group(0)
     return ""
@@ -93,12 +118,12 @@ def read_file_text(filename: str, bytes_data: bytes) -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext == ".pdf":
         if not pdf_extract_text:
-            raise RuntimeError("pdfminer.six не установлен. pip install pdfminer.six")
+            raise RuntimeError("pdfminer.six is missing. pip install pdfminer.six")
         with io.BytesIO(bytes_data) as bio:
             return pdf_extract_text(bio)
     if ext == ".docx":
         if not docx:
-            raise RuntimeError("python-docx не установлен. pip install python-docx")
+            raise RuntimeError("python-docx is missing. pip install python-docx")
         with io.BytesIO(bytes_data) as bio:
             d = docx.Document(bio)
             return "\n".join(p.text for p in d.paragraphs)
@@ -107,7 +132,7 @@ def read_file_text(filename: str, bytes_data: bytes) -> str:
             return bytes_data.decode("utf-8", errors="ignore")
         except Exception:
             return bytes_data.decode("latin-1", errors="ignore")
-    raise ValueError(f"Неподдерживаемый формат: {ext}")
+    raise ValueError(f"Unsupported format: {ext}")
 
 def html_to_text(html_bytes: bytes, base_url: str = "") -> str:
     try:
@@ -207,7 +232,7 @@ def _safe_get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Dict:
 
 @st.cache_data(show_spinner=False)
 def fetch_provider_models(provider: str, api_key: str = "", base_url: str = "") -> List[str]:
-    """Подтягиваем список моделей для UI (если не получилось — отдаём дефолт)."""
+    """Fetch model list for the UI; fall back to defaults when discovery fails."""
     provider = (provider or "").strip().lower()
     if provider not in DEFAULT_MODEL_CHOICES:
         return DEFAULT_MODEL_CHOICES["openai"]
@@ -230,12 +255,12 @@ def fetch_provider_models(provider: str, api_key: str = "", base_url: str = "") 
             if ids:
                 return ids
         elif provider == "lmstudio":
-            # Поддерживаем варианты с /v1 и без него, чтобы не спотыкаться о базовый URL
+            # Support both /v1 and plain roots to be resilient to user-supplied base URLs
             base = (base_url or "http://localhost:1234").rstrip("/")
             primary = base if base.endswith("/v1") else base + "/v1"
             candidates = [primary + "/models"]
             if base != primary:
-                candidates.append(base + "/models")  # fallback для старых UI, что уже добавили /v1
+                candidates.append(base + "/models")  # fallback for pre-suffixed URLs
 
             headers = {"Authorization": f"Bearer {api_key.strip()}"} if api_key.strip() else None
             for url in candidates:
@@ -246,9 +271,9 @@ def fetch_provider_models(provider: str, api_key: str = "", base_url: str = "") 
                         return ids
                 except Exception:
                     continue
-            raise RuntimeError("LM Studio не вернул список моделей")
+            raise RuntimeError("LM Studio did not return model IDs")
     except Exception as exc:
-        st.warning(f"Не удалось подтянуть модели {provider}: {exc}")
+        st.warning(f"Failed to fetch models from {provider}: {exc}")
 
     return DEFAULT_MODEL_CHOICES[provider]
 
@@ -279,7 +304,7 @@ def stream_download(url: str) -> Tuple[str, bytes, str]:
                 chunks_list.append(chunk)
                 total += len(chunk)
                 if total > MAX_DOWNLOAD_MB * 1024 * 1024:
-                    raise RuntimeError(f"Слишком большой файл (> {MAX_DOWNLOAD_MB}MB)")
+                    raise RuntimeError(f"File too large (> {MAX_DOWNLOAD_MB}MB)")
         data = b"".join(chunks_list)
         fname = guess_filename_from_headers(url, r)
         fname = ensure_allowed_extension(fname, r.headers.get("Content-Type",""))
@@ -287,12 +312,12 @@ def stream_download(url: str) -> Tuple[str, bytes, str]:
 
 
 def collect_local_directory(dir_path: str, recursive: bool = False) -> List[Dict[str, object]]:
-    """Сканирует локальную директорию на сервере и отдаёт файлы в нужной нам структуре."""
+    """Scan a local server directory and return files in the expected structure."""
     dir_path = (dir_path or "").strip()
     if not dir_path:
         return []
     if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
-        raise FileNotFoundError(f"{dir_path} не существует или не является директорией")
+        raise FileNotFoundError(f"{dir_path} does not exist or is not a directory")
 
     items: List[Dict[str, object]] = []
     walker = os.walk(dir_path) if recursive else [(dir_path, [], os.listdir(dir_path))]
@@ -306,79 +331,16 @@ def collect_local_directory(dir_path: str, recursive: bool = False) -> List[Dict
                 with open(full_path, "rb") as f:
                     b = f.read()
                 items.append({"kind": "file", "name": fname, "bytes": b, "source_path": full_path})
-            except Exception as exc:  # пишем по-человечески, потому что это реальные логи
+            except Exception as exc:  # keep logs human-readable
                 print(f"[dir-scan] {full_path}: {exc}")
     return items
 
-def extract_links_from_excel(xlsx_bytes: bytes, url_column_hint: str = "", fio_column_hint: str = "") -> List[Dict[str, str]]:
-    df = pd.read_excel(io.BytesIO(xlsx_bytes), engine="openpyxl")
-
-    # эвристика для колонок
-    def likely_url_col(col: str) -> bool:
-        c = col.lower()
-        return any(k in c for k in ["url", "link", "ссылка", "resume", "cv"])  # подсказки
-    def likely_fio_col(col: str) -> bool:
-        c = col.lower()
-        return any(k in c for k in ["fio", "фио", "name", "фамилия", "имя"])
-
-    url_cols = []
-    fio_cols = []
-
-    # если подсказали явно — используем
-    if url_column_hint and url_column_hint in df.columns:
-        url_cols = [url_column_hint]
-    if fio_column_hint and fio_column_hint in df.columns:
-        fio_cols = [fio_column_hint]
-
-    # авто-детекция
-    if not url_cols:
-        # берем все колонки, где встречаются URL
-        for c in df.columns:
-            s = df[c].astype(str)
-            hits = s[s.map(lambda x: bool(URL_RE.search(x)))]
-            if len(hits) > 0 or likely_url_col(str(c)):
-                url_cols.append(c)
-    if not fio_cols:
-        for c in df.columns:
-            if likely_fio_col(str(c)):
-                fio_cols.append(c)
-
-    # если ничего не нашли — пусто
-    if not url_cols:
-        return []
-
-    # собираем строки: берем первую URL-колонку, а ФИО — из первой подходящей ФИО-колонки (если есть)
-    url_col_primary = url_cols[0]
-    fio_col_primary = fio_cols[0] if fio_cols else None
-
-    rows = []
-    for _, r in df.iterrows():
-        raw = str(r.get(url_col_primary, "") or "")
-        if not URL_RE.search(raw):
-            # попробуем пробежаться по всем url_cols (если несколько)
-            found = ""
-            for uc in url_cols:
-                raw2 = str(r.get(uc, "") or "")
-                if URL_RE.search(raw2):
-                    found = raw2
-                    break
-            if not found:
-                continue
-            raw = found
-        url = normalize_url(raw)
-        if not url:
-            continue
-        fio_val = str(r.get(fio_col_primary, "") or "") if fio_col_primary else ""
-        rows.append({"url": url, "fio": fio_val.strip()})
-    return rows
-
 # ---------- LLM ----------
 class LLMClient:
-    """Небольшой тонкий слой над OpenAI-совместимыми LLM.
+    """Thin wrapper for OpenAI-compatible LLMs.
 
-    Работает и с облачным OpenAI, OpenRouter, и с локальным LM Studio (или
-    любыми API, говорящими на совместимом протоколе). Простой и без магии —
-    чтобы при отладке было понятно, что именно отправляется в модель.
+    Works with OpenAI, OpenRouter, LM Studio, or any OpenAI-style API. Keeps
+    the payload explicit for easier debugging.
     """
 
     def __init__(self, api_key: str, model: str = "gpt-4o-mini", base_url: str = "", extra_headers: Optional[Dict[str,str]] = None):
@@ -397,33 +359,19 @@ class LLMClient:
         resumes: List[Dict[str, str]],
         role_desc: str,
         criteria: List[Criterion],
-        job_title: str = "",
     ) -> List[Dict[str, object]]:
         """
-        Один вызов на партию до 5 резюме.
-        Вход: resumes = [{id: str, text: str}, ...]
-        Выход: [
-          {
-            "id": str,
-            "specialization_main": str,
-            "specialization_alt": [str],
-            "emails": [str],
-            "phones": [str],
-            "scores": {criterion: float},
-            "reasoning": {criterion: str}
-          }, ...
-        ]
+        Batch request (kept for reference; single mode is the default UI path).
         """
         system = (
-            "Ты — ассистент HR. Для КАЖДОГО резюме из списка:\n"
-            "1) Извлеки специализацию: 'specialization_main' (до 80 символов) и до 3 альтернатив.\n"
-            "2) Извлеки ФИО кандидата в 'full_name' (если невозможно — оставь пустую строку).\n"
-            "3) Извлеки контакты: 'emails' и 'phones' (желательно в международном формате).\n"
-            "4) Оцени по критериям 0..5 и дай краткие, но информативные пояснения по каждому критерию.\n"
-            "Возвращай JSON строго по схеме для всех входов."
+            "You are an HR assistant. For EACH resume in the list:\n"
+            "1) Extract specialization: 'specialization_main' (<=80 chars) plus up to 3 alternatives.\n"
+            "2) Extract candidate full name into 'full_name' (empty if unknown).\n"
+            "3) Extract contacts: 'emails' and 'phones' (international format preferred).\n"
+            "4) Score every criterion 0..5 with concise reasoning per criterion.\n"
+            "Return JSON exactly matching the schema for all inputs."
         )
         payload = {
-            "role_title": job_title,
             "role_description": role_desc,
             "criteria": [c.model_dump() for c in criteria],
             "resumes": [{"id": r["id"], "text": r["text"][:18000]} for r in resumes][:5]
@@ -474,21 +422,19 @@ class LLMClient:
         resume: Dict[str, str],
         role_desc: str,
         criteria: List[Criterion],
-        job_title: str = "",
     ) -> Dict[str, object]:
-        """Более надёжный однорезюмный вариант без батчинга."""
+        """Safer single-resume scoring without batching."""
 
         system = (
-            "Ты — ассистент HR. Тебе даётся одно резюме.\n"
-            "1) Извлеки специализацию: 'specialization_main' (до 80 символов) и до 3 альтернатив.\n"
-            "2) Извлеки ФИО кандидата в 'full_name' (если невозможно — оставь пустую строку).\n"
-            "3) Извлеки контакты: 'emails' и 'phones' (желательно в международном формате).\n"
-            "4) Оцени по критериям 0..5 и дай краткие пояснения по каждому критерию.\n"
-            "Возвращай JSON строго по схеме."
+            "You are an HR assistant. You receive ONE resume.\n"
+            "1) Extract specialization: 'specialization_main' (<=80 chars) plus up to 3 alternatives.\n"
+            "2) Extract the candidate full name into 'full_name' (leave empty if unknown).\n"
+            "3) Extract contacts: 'emails' and 'phones' (international format preferred).\n"
+            "4) Score every criterion 0..5 with concise reasoning per criterion.\n"
+            "Return JSON exactly following the schema."
         )
 
         payload = {
-            "role_title": job_title,
             "role_description": role_desc,
             "criteria": [c.model_dump() for c in criteria],
             "resume": {"id": resume["id"], "text": resume["text"][:18000]},
@@ -524,10 +470,9 @@ class LLMClient:
         data = json.loads(content)
         return data
 
-    def suggest_criteria(self, role_desc: str, job_title: str = "", max_items: int = 10) -> List[Criterion]:
-        """Генерация набора критериев/навыков под описание роли."""
+    def suggest_criteria(self, role_desc: str, max_items: int = 10) -> List[Criterion]:
+        """Generate skill/criteria suggestions from the role description."""
         prompt = {
-            "role_title": job_title,
             "role_description": role_desc,
             "format": "json",
             "max_items": max_items,
@@ -538,8 +483,8 @@ class LLMClient:
                 {
                     "role": "system",
                     "content": (
-                        "Ты карьерный эксперт. По описанию вакансии верни до 10 ключевых критериев/навыков. "
-                        "Каждый критерий: name, weight (0.5..3.0, выше для must-have), keywords (3-6 штук)."
+                        "You are a career expert. Based on the job description, return up to 10 key criteria/skills. "
+                        "Each item: name, weight (0.5..3.0, higher for must-haves), keywords (3-6)."
                     ),
                 },
                 {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
@@ -582,28 +527,28 @@ class LLMClient:
         return out
 
 
-def create_llm_client(provider: str, api_key: str, model: str, custom_base_url: str = "") -> LLMClient:
-    provider = (provider or "openai").lower()
+def create_llm_client(settings: LLMSettings) -> LLMClient:
+    provider = (settings.provider or "openai").lower()
     if provider == "lmstudio":
-        base_url = custom_base_url.strip() or "http://localhost:1234/v1"
-        key = api_key.strip() or "lm-studio"
-        return LLMClient(api_key=key, model=model, base_url=base_url)
+        base_url = settings.base_url.strip() or "http://localhost:1234/v1"
+        key = settings.api_key.strip() or "lm-studio"
+        return LLMClient(api_key=key, model=settings.model, base_url=base_url)
     if provider == "openrouter":
-        key = api_key.strip()
+        key = settings.api_key.strip()
         if not key:
-            raise ValueError("Нужен API Key OpenRouter")
-        headers = {
-            "HTTP-Referer": "https://github.com/user/portfolio",  # хорошие манеры для OpenRouter
+            raise ValueError("OpenRouter API Key is required")
+        headers = settings.headers or {
+            "HTTP-Referer": "https://github.com/user/portfolio",  # good manners for OpenRouter
             "X-Title": "Resume ranker",
         }
-        return LLMClient(api_key=key, model=model, base_url="https://openrouter.ai/api/v1", extra_headers=headers)
+        return LLMClient(api_key=key, model=settings.model, base_url="https://openrouter.ai/api/v1", extra_headers=headers)
     if provider == "custom":
-        base_url = custom_base_url.strip()
+        base_url = settings.base_url.strip()
         if not base_url:
-            raise ValueError("Укажите base_url для кастомного провайдера")
-        key = api_key.strip() or "token-placeholder"
-        return LLMClient(api_key=key, model=model, base_url=base_url)
-    return LLMClient(api_key=api_key.strip(), model=model)
+            raise ValueError("Provide base_url for the custom provider")
+        key = settings.api_key.strip() or "token-placeholder"
+        return LLMClient(api_key=key, model=settings.model, base_url=base_url, extra_headers=settings.headers)
+    return LLMClient(api_key=settings.api_key.strip(), model=settings.model, base_url=settings.base_url or "", extra_headers=settings.headers)
 
 # ---------- Similarity ----------
 def max_similarities(texts: List[str], names: List[str]) -> Tuple[List[float], List[str], pd.DataFrame]:
@@ -655,8 +600,8 @@ def compute_scores_table(base_rows: List[Dict], criteria: List[Criterion], dup_t
         return (s[:n-1] + "…") if len(s) > n else s
 
     def calc_comment(row):
-        fio = clamp_local(row.get("ФИО", ""), 80)
-        spec = clamp_local(row.get("Специализация", ""), 100)
+        fio = clamp_local(row.get("FullName", ""), 80)
+        spec = clamp_local(row.get("Specialization", ""), 100)
         cov = row.get("Coverage", 0.0)
 
         pct_cols = [(k.replace("::Pct",""), k) for k in df.columns if k.endswith("::Pct")]
@@ -679,22 +624,22 @@ def compute_scores_table(base_rows: List[Dict], criteria: List[Criterion], dup_t
                 gaps.append(f"{c} ({sc:.1f})" + (f": {gap_reason}" if gap_reason else ""))
 
         risks = []
-        if float(row.get("SimilarityMax", 0)) >= dup_threshold: risks.append("риск дубликата по Similarity")
-        if not row.get("Email"): risks.append("нет email")
-        if not row.get("Phone"): risks.append("нет телефона")
+        if float(row.get("SimilarityMax", 0)) >= dup_threshold: risks.append("possible duplicate by similarity")
+        if not row.get("Email"): risks.append("missing email")
+        if not row.get("Phone"): risks.append("missing phone")
 
-        strengths_txt = ", ".join(strengths_parts) if strengths_parts else "нет явных сильных сторон"
+        strengths_txt = ", ".join(strengths_parts) if strengths_parts else "no standout strengths"
         examples_txt = " | ".join(examples_parts) if examples_parts else ""
         gaps_txt = "; ".join(gaps) if gaps else "—"
 
         return (
-            f"{('Кандидат: ' + fio + '. ') if fio else ''}"
-            f"{('Специализация: ' + spec + '. ') if spec else ''}"
-            f"Итог {row['CompositeScore']:.0f}/100. Покрытие {cov:.0%}. "
-            f"Сильные стороны: {strengths_txt}. "
-            f"{('Примеры: ' + examples_txt + '. ') if examples_txt else ''}"
-            f"Пробелы: {gaps_txt}."
-            f"{(' Риски: ' + ', '.join(risks) + '.') if risks else ''}"
+            f"{('Candidate: ' + fio + '. ') if fio else ''}"
+            f"{('Specialization: ' + spec + '. ') if spec else ''}"
+            f"Total {row['CompositeScore']:.0f}/100. Coverage {cov:.0%}. "
+            f"Strengths: {strengths_txt}. "
+            f"{('Examples: ' + examples_txt + '. ') if examples_txt else ''}"
+            f"Gaps: {gaps_txt}."
+            f"{(' Risks: ' + ', '.join(risks) + '.') if risks else ''}"
         )
 
     df["CalcComment"] = df.apply(calc_comment, axis=1)
@@ -722,235 +667,74 @@ def append_checkpoint(cp_path: str, file_hash: str, data: Dict):
 def reset_checkpoint(cp_path: str):
     if cp_path and os.path.exists(cp_path): os.remove(cp_path)
 
-# ---------- UI ----------
-st.set_page_config(page_title="🗑️ clean_the_garbage.exe — Lola, Liza & Partners LLC", layout="wide")
-st.title("🗑️ clean_the_garbage.exe")
-st.caption("Lola, Liza & Partners LLC — serious screening for massive resume batches")
 
-with st.sidebar:
-    st.header("⚙️ LLM")
-    provider = st.selectbox(
-        "Провайдер LLM",
-        ["openai", "openrouter", "lmstudio", "custom"],
-        format_func=lambda x: {
-            "openai": "OpenAI (облако)",
-            "openrouter": "OpenRouter (облако)",
-            "lmstudio": "LM Studio (локально)",
-            "custom": "Custom base_url",
-        }[x],
-    )
-    api_key = st.text_input(
-        "API Key",
-        type="password",
-        help="Для LM Studio можно оставить пустым — тогда возьмём 'lm-studio' по умолчанию.",
-    )
-    default_lm_url = "http://localhost:1234/v1"
-    custom_base_url = ""
-    if provider in {"lmstudio", "custom"}:
-        custom_base_url = st.text_input(
-            "Base URL (LM Studio/custom)",
-            value=default_lm_url if provider == "lmstudio" else "",
-            help="OpenAI-совместимый endpoint. Для LM Studio стандартный порт — 1234.",
-        )
-    model_options = fetch_provider_models(provider, api_key, custom_base_url)
-    model_name = st.selectbox("Модель", model_options, index=0)
-
-    st.header("📌 Роль/критерии")
-    job_title = st.text_input("Название роли (опц.)", value="")
-    role_desc = st.text_area("Описание роли/вакансии (обязательно)", height=140)
-
-    st.subheader("Ключевые навыки/критерии (обязательно)")
-    default_criteria = [
-        {"name": "Опыт в домене", "weight": 2.0, "keywords": ["опыт", "профиль"]},
-        {"name": "Hard skills", "weight": 1.8, "keywords": ["stack", "технологии"]},
-        {"name": "Soft skills", "weight": 1.2, "keywords": ["коммуникация", "командная работа"]},
-        {"name": "Достижения", "weight": 1.4, "keywords": ["результаты", "impact"]},
-    ]
-    crit_state_key = "criteria_json"
-    if crit_state_key not in st.session_state:
-        st.session_state[crit_state_key] = json.dumps(default_criteria, ensure_ascii=False, indent=2)
-
-    def _generate_criteria():
-        if not role_desc.strip():
-            st.error("Сначала добавьте описание роли — по нему будем генерировать навыки")
-            return
-        try:
-            generator_client = create_llm_client(provider, api_key, model_name, custom_base_url)
-            generated = generator_client.suggest_criteria(role_desc, job_title)
-            if not generated:
-                st.warning("LLM не вернул навыки. Заполните вручную.")
-                return
-            st.session_state[crit_state_key] = json.dumps(
-                [c.model_dump() for c in generated],
-                ensure_ascii=False,
-                indent=2,
-            )
-            st.session_state["criteria_generated_ok"] = True
-        except Exception as e:
-            st.error(f"Не удалось сгенерировать навыки: {e}")
-
-    crit_cols = st.columns([3, 1])
-    with crit_cols[1]:
-        st.markdown(" ")
-        st.markdown(" ")
-        if st.button("⚡️ Сгенерировать навыки", use_container_width=True):
-            _generate_criteria()
-
-    crit_json = crit_cols[0].text_area(
-        "Список навыков/критериев (JSON)",
-        key=crit_state_key,
-        height=240,
-        help="Каждый объект: name, weight, keywords[]. Вес — важность критерия.",
-    )
-
-    if st.session_state.pop("criteria_generated_ok", False):
-        st.success("Навыки сгенерированы и подставлены ниже")
-
-    criteria: List[Criterion] = []
-    try:
-        criteria = [Criterion(**c) for c in json.loads(crit_json)]
-    except Exception as e:
-        st.error(f"Ошибка критериев: {e}")
-
-    if criteria:
-        weights_df = pd.DataFrame(
-            [{"Критерий": c.name, "Вес": c.weight, "Ключевые слова": ", ".join(c.keywords)} for c in criteria]
-        )
-        st.dataframe(weights_df, hide_index=True, use_container_width=True)
-
-    st.subheader("Дубликаты")
-    dup_threshold = st.slider("Порог похожести (риск дубликата)", min_value=70, max_value=100, value=90, step=1)
-
-    st.subheader("Вывод")
-    save_path = st.text_input("Путь сохранения XLSX (на сервере)", value="resume_ranking.xlsx")
-    add_pairs = st.checkbox("Лист SimilarityPairs (топ-200)", value=True)
-
-    st.subheader("Чекпоинт")
-    cp_path = st.text_input("Файл чекпоинта (.jsonl)", value="resume_ranker_checkpoint.jsonl")
-    colA, colB = st.columns(2)
-    with colA:
-        resume_from_cp = st.checkbox("Возобновлять из чекпоинта", value=True)
-    with colB:
-        if st.button("♻️ Сбросить чекпоинт"):
-            reset_checkpoint(cp_path); st.success("Чекпоинт удалён.")
-
-st.markdown("## 📥 Загрузка резюме")
-files = st.file_uploader(
-    "Файлы (PDF/DOCX/TXT/MD/RTF)",
-    type=[ext[1:] for ext in ALLOWED_EXT],
-    accept_multiple_files=True
-)
-st.markdown("#### Или добавьте XLSX со ссылками на резюме")
-col_x_a, col_x_b, col_x_c = st.columns([2,1,1])
-with col_x_a:
-    xlsx_file = st.file_uploader("XLSX (один файл)", type=["xlsx"], accept_multiple_files=False)
-with col_x_b:
-    xlsx_url_column_hint = st.text_input("Колонка со ссылками (опц.)", value="")
-with col_x_c:
-    xlsx_fio_column_hint = st.text_input("Колонка с ФИО (опц.)", value="")
-
-st.markdown("#### Или подхватите резюме из директории на сервере")
-col_dir_a, col_dir_b = st.columns([2,1])
-with col_dir_a:
-    local_dir_path = st.text_input("Путь к директории (опц.)", value="")
-with col_dir_b:
-    local_dir_recursive = st.checkbox("С подпапками", value=False)
-
-run = st.button("🚀 Обработать и выгрузить XLSX")
-
-# ---------- Main ----------
-if run:
-    if provider == "openai" and not api_key:
-        st.error("Укажите OpenAI API Key")
+# ---------- Validation & intake helpers ----------
+def validate_inputs(settings: LLMSettings, role_ctx: RoleContext, intake_mode: str, files, link_inputs: List[str]):
+    """Stop execution with clear UI errors when required inputs are missing."""
+    if settings.provider == "openai" and not settings.api_key:
+        st.error("Provide an OpenAI API Key")
         st.stop()
-    if provider == "openrouter" and not api_key:
-        st.error("Укажите OpenRouter API Key")
+    if settings.provider == "openrouter" and not settings.api_key:
+        st.error("Provide an OpenRouter API Key")
         st.stop()
-    if provider == "custom" and not custom_base_url.strip():
-        st.error("Для кастомного провайдера нужен base_url")
+    if settings.provider == "custom" and not settings.base_url.strip():
+        st.error("Custom providers require a base_url")
         st.stop()
-    if not role_desc.strip():
-        st.error("Описание роли обязательно: добавьте краткий текст вакансию/контекст")
+    if not role_ctx.description.strip():
+        st.error("Role description is required: add a short vacancy/context paragraph")
         st.stop()
-    if not criteria: st.error("Задайте валидные критерии"); st.stop()
-    if not (files or xlsx_file or local_dir_path.strip()):
-        st.error("Добавьте файлы, XLSX со ссылками или директорию на сервере")
+    if not role_ctx.criteria:
+        st.error("Please provide valid criteria")
+        st.stop()
+    if intake_mode == "Select an option":
+        st.error("Choose how to provide resumes: upload files or paste cloud links")
+        st.stop()
+    if intake_mode == "Upload files" and not files:
+        st.error("Upload at least one resume file")
+        st.stop()
+    if intake_mode == "Cloud links" and not link_inputs:
+        st.error("Add at least one direct link to resume files or pages")
         st.stop()
 
-    try:
-        client = create_llm_client(provider, api_key, model_name, custom_base_url)
-    except Exception as e:
-        st.error(f"LLM клиент не собрался: {e}")
-        st.stop()
-    cache = load_checkpoint(cp_path) if resume_from_cp else {}
 
-    rows: List[Dict] = []
-    texts: List[str] = []
-    filenames: List[str] = []
-    seen_file_hash, seen_text_hash = set(), set()
-
-    # Источники
-    incoming_items = []  # {"kind":"file"|"url", "name":..., "bytes":..., "url"?:..., "content_type"?:..., "excel_fio"?:...}
-
-    # 1) локальные файлы, загруженные через UI
-    for f in (files or []):
-        try:
-            b = f.getvalue()
-            incoming_items.append({"kind":"file", "name": f.name, "bytes": b})
-        except Exception as e:
-            st.error(f"{f.name}: не удалось прочитать — {e}")
-
-    # 2) локальная директория на сервере (опционально)
-    if local_dir_path.strip():
-        try:
-            dir_items = collect_local_directory(local_dir_path, recursive=local_dir_recursive)
-            incoming_items.extend(dir_items)
-            if dir_items:
-                st.success(f"Из директории добавлено {len(dir_items)} файлов")
-            else:
-                st.info("В директории не найдено файлов поддерживаемых форматов")
-        except Exception as e:
-            st.error(f"Директория {local_dir_path}: {e}")
-
-    # 3) XLSX со ссылками (+ФИО из файла)
-    link_rows: List[Dict[str,str]] = []
-    if xlsx_file is not None:
-        try:
-            xlsx_bytes = xlsx_file.getvalue()
-            link_rows = extract_links_from_excel(xlsx_bytes, xlsx_url_column_hint, xlsx_fio_column_hint)
-            if not link_rows:
-                st.warning("В XLSX не найдено ссылок. Проверьте имя колонки или содержание файла.")
-        except Exception as e:
-            st.error(f"Ошибка чтения XLSX: {e}")
-
-    # скачивание ссылок
-    if link_rows:
-        st.markdown("#### Загрузка резюме по ссылкам")
-        dl_bar = st.progress(0.0)
-        for i, item in enumerate(link_rows, start=1):
-            u = item["url"]; excel_fio = item.get("fio","").strip()
+def collect_incoming_items(intake_mode: str, files, link_inputs: List[str]) -> List[Dict[str, object]]:
+    """Normalize uploaded files or remote links into a single list of work items."""
+    incoming_items: List[Dict[str, object]] = []
+    if intake_mode == "Upload files":
+        for f in (files or []):
             try:
-                fname, data, ct = stream_download(u)
-                incoming_items.append({"kind":"url", "name": fname, "bytes": data, "url": u, "content_type": ct, "excel_fio": excel_fio})
+                b = f.getvalue()
+                incoming_items.append({"kind": "file", "name": f.name, "bytes": b})
             except Exception as e:
-                st.warning(f"Не удалось скачать: {u} — {e}")
-            finally:
-                dl_bar.progress(i/len(link_rows))
+                st.error(f"{f.name}: failed to read — {e}")
+    elif intake_mode == "Cloud links":
+        if link_inputs:
+            st.markdown("#### Downloading resumes from links")
+            dl_bar = st.progress(0.0)
+            for i, u in enumerate(link_inputs, start=1):
+                try:
+                    fname, data, ct = stream_download(u)
+                    incoming_items.append({"kind": "url", "name": fname, "bytes": data, "url": u, "content_type": ct})
+                except Exception as e:
+                    st.warning(f"Could not download {u}: {e}")
+                finally:
+                    dl_bar.progress(i / len(link_inputs))
+    return incoming_items
 
-    status = st.empty()
-    st.markdown("#### Прогресс")
-    progress_bar = st.progress(0.0)
 
-    # -------- Pass 1: локальный парсинг/дедуп --------
-    parsed_items = []  # [{id, fh, th, name, text, url?, excel_fio?}]
+def parse_and_dedupe_items(incoming_items: List[Dict[str, object]], status_holder, progress_bar) -> Tuple[List[ResumeArtifact], set, set]:
+    """Read bytes into text, convert HTML when needed, and drop duplicates early."""
+    parsed_items: List[ResumeArtifact] = []
+    seen_file_hash, seen_text_hash = set(), set()
     total_items = len(incoming_items)
+
     for i, item in enumerate(incoming_items, start=1):
         disp_name = item.get("name") or item.get("url") or f"item_{i}"
-        status.text(f"Чтение источника: {disp_name} ({i}/{total_items})")
+        status_holder.text(f"Reading source: {disp_name} ({i}/{total_items})")
         b = item["bytes"]
         fh = sha1_bytes(b)
         if fh in seen_file_hash:
-            progress_bar.progress(i/total_items)
+            progress_bar.progress(i / total_items)
             continue
 
         content_type = (item.get("content_type") or "").lower()
@@ -958,59 +742,269 @@ if run:
 
         try:
             if content_type.startswith("text/html") or ext in {".html", ".htm"}:
-                text = html_to_text(b, base_url=item.get("url",""))
+                text = html_to_text(b, base_url=item.get("url", ""))
             else:
                 if ext not in ALLOWED_EXT and ext == "":
                     disp_name = disp_name + ".pdf"
                     ext = ".pdf"
                 text = read_file_text(disp_name, b)
         except Exception as e:
-            st.error(f"{disp_name}: ошибка чтения — {e}")
-            progress_bar.progress(i/total_items)
+            st.error(f"{disp_name}: failed to read — {e}")
+            progress_bar.progress(i / total_items)
             continue
 
         th = sha1_text(normalize_for_sim(text))
         if th in seen_text_hash:
-            progress_bar.progress(i/total_items)
+            progress_bar.progress(i / total_items)
             continue
 
-        parsed = {"id": fh, "fh": fh, "th": th, "name": disp_name, "text": text}
-        if "url" in item: parsed["url"] = item["url"]
-        if "excel_fio" in item: parsed["excel_fio"] = item["excel_fio"]
-        parsed_items.append(parsed)
+        parsed_items.append(
+            ResumeArtifact(
+                id=fh,
+                file_hash=fh,
+                text_hash=th,
+                name=disp_name,
+                text=text,
+                url=item.get("url", ""),
+            )
+        )
 
-        seen_file_hash.add(fh); seen_text_hash.add(th)
-        progress_bar.progress(i/total_items)
+        seen_file_hash.add(fh)
+        seen_text_hash.add(th)
+        progress_bar.progress(i / total_items)
+
+    return parsed_items, seen_file_hash, seen_text_hash
+
+# ---------- UI ----------
+st.set_page_config(page_title="🍵 Matchya — Hire faster", layout="wide")
+st.markdown(
+    """
+    <style>
+    section[data-testid='stSidebar'] {width: 27rem;}
+    section[data-testid='stSidebar'] > div:first-child {width: 27rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.title("🍵 Matchya")
+st.caption("Hire faster")
+
+with st.sidebar:
+    st.header("⚙️ LLM")
+    provider = st.selectbox(
+        "LLM provider",
+        ["openai", "openrouter", "lmstudio", "custom"],
+        format_func=lambda x: {
+            "openai": "OpenAI (cloud)",
+            "openrouter": "OpenRouter (cloud)",
+            "lmstudio": "LM Studio (local)",
+            "custom": "Custom base_url",
+        }[x],
+    )
+    api_key = st.text_input(
+        "API Key",
+        type="password",
+        help="Leave blank for LM Studio if you rely on the default 'lm-studio' token.",
+    )
+    default_lm_url = "http://localhost:1234/v1"
+    custom_base_url = ""
+    if provider in {"lmstudio", "custom"}:
+        custom_base_url = st.text_input(
+            "Base URL (LM Studio/custom)",
+            value=default_lm_url if provider == "lmstudio" else "",
+            help="OpenAI-compatible endpoint. LM Studio default port is 1234.",
+        )
+    model_options = fetch_provider_models(provider, api_key, custom_base_url)
+    model_name = st.selectbox("Model", model_options, index=0)
+
+    llm_headers = {"HTTP-Referer": "https://github.com/user/portfolio", "X-Title": "Matchya"} if provider == "openrouter" else None
+    llm_settings = LLMSettings(
+        provider=provider,
+        api_key=api_key,
+        model=model_name,
+        base_url=custom_base_url,
+        headers=llm_headers,
+    )
+
+    st.header("📌 Role & criteria")
+    role_desc = st.text_area("Role / vacancy description (required)", height=140)
+
+    st.subheader("Key skills / criteria (required)")
+    default_criteria = [
+        {"name": "Domain experience", "weight": 2.0, "keywords": ["experience", "domain"]},
+        {"name": "Hard skills", "weight": 1.8, "keywords": ["stack", "tech"]},
+        {"name": "Soft skills", "weight": 1.2, "keywords": ["communication", "teamwork"]},
+        {"name": "Achievements", "weight": 1.4, "keywords": ["results", "impact"]},
+    ]
+    crit_state_key = "criteria_table"
+    if crit_state_key not in st.session_state:
+        st.session_state[crit_state_key] = [
+            {
+                "Criterion": c["name"],
+                "Weight": c["weight"],
+                "Keywords": ", ".join(c.get("keywords") or []),
+            }
+            for c in default_criteria
+        ]
+
+    def _generate_criteria():
+        if not role_desc.strip():
+            st.error("Add a role description first to generate skills automatically.")
+            return
+        try:
+            generator_client = create_llm_client(llm_settings)
+            generated = generator_client.suggest_criteria(role_desc)
+            if not generated:
+                st.warning("LLM returned no skills. Please fill manually.")
+                return
+            st.session_state[crit_state_key] = [
+                {"Criterion": c.name, "Weight": c.weight, "Keywords": ", ".join(c.keywords)}
+                for c in generated
+            ]
+            st.session_state["criteria_generated_ok"] = True
+        except Exception as e:
+            st.error(f"Could not generate skills: {e}")
+
+    crit_cols = st.columns([1, 3])
+    with crit_cols[0]:
+        if st.button("⚡️ Generate skills", use_container_width=True):
+            _generate_criteria()
+        st.caption("Optional: draft criteria from the description, then tweak below.")
+
+    editor_value = st.data_editor(
+        st.session_state[crit_state_key],
+        column_config={
+            "Criterion": st.column_config.TextColumn("Criterion", help="One skill per row"),
+            "Weight": st.column_config.NumberColumn(
+                "Weight (0.0–3.0)", min_value=0.0, step=0.1, format="%.1f"
+            ),
+            "Keywords": st.column_config.TextColumn(
+                "Keywords (comma-separated)",
+                help="Optional hints to keep the LLM focused",
+                width="medium",
+            ),
+        },
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        key="criteria_editor",
+    )
+
+    st.session_state[crit_state_key] = (
+        editor_value.to_dict("records") if hasattr(editor_value, "to_dict") else editor_value
+    )
+
+    if st.session_state.pop("criteria_generated_ok", False):
+        st.success("Skills generated and inserted below")
+
+    criteria: List[Criterion] = []
+    try:
+        crit_records = st.session_state.get(crit_state_key, [])
+        parsed_records: List[Dict[str, object]] = (
+            crit_records.to_dict("records") if hasattr(crit_records, "to_dict") else list(crit_records)
+        )
+        for row in parsed_records:
+            name = str(row.get("Criterion", "")).strip()
+            if not name:
+                continue
+            weight_val = float(row.get("Weight") or 0.0)
+            kw_raw = row.get("Keywords") or ""
+            if isinstance(kw_raw, list):
+                keywords = [str(k).strip() for k in kw_raw if str(k).strip()]
+            else:
+                keywords = [k.strip() for k in str(kw_raw).split(",") if k.strip()]
+            criteria.append(Criterion(name=name, weight=weight_val, keywords=keywords))
+    except Exception as e:
+        st.error(f"Criteria parsing error: {e}")
+
+    role_ctx = RoleContext(description=role_desc, criteria=criteria)
+
+    st.subheader("Duplicates")
+    dup_threshold = st.slider("Similarity threshold (duplicate risk)", min_value=70, max_value=100, value=90, step=1)
+
+    st.subheader("Output")
+    save_path = st.text_input("Save XLSX path (server)", value="resume_ranking.xlsx")
+    add_pairs = st.checkbox("Include SimilarityPairs sheet (top 200)", value=True)
+
+    st.subheader("Checkpoint")
+    cp_path = st.text_input("Checkpoint file (.jsonl)", value="resume_ranker_checkpoint.jsonl")
+    colA, colB = st.columns(2)
+    with colA:
+        resume_from_cp = st.checkbox("Resume from checkpoint", value=True)
+    with colB:
+        if st.button("♻️ Reset checkpoint"):
+            reset_checkpoint(cp_path); st.success("Checkpoint removed.")
+
+st.markdown("## 📥 Resume intake")
+intake_mode = st.selectbox("Choose how to provide resumes", ["Select an option", "Upload files", "Cloud links"])
+files: List = []
+link_inputs: List[str] = []
+
+if intake_mode == "Upload files":
+    files = st.file_uploader(
+        "Files (PDF/DOCX/TXT/MD/RTF)",
+        type=[ext[1:] for ext in ALLOWED_EXT],
+        accept_multiple_files=True,
+    )
+elif intake_mode == "Cloud links":
+    urls_raw = st.text_area(
+        "One link per line (direct links to resume files or HTML pages)",
+        placeholder="https://...",
+    )
+    link_inputs = [normalize_url(u) for u in urls_raw.splitlines() if normalize_url(u)]
+
+run = st.button("🚀 Process and export XLSX")
+
+# ---------- Main ----------
+if run:
+    validate_inputs(llm_settings, role_ctx, intake_mode, files, link_inputs)
+
+    try:
+        client = create_llm_client(llm_settings)
+    except Exception as e:
+        st.error(f"LLM client could not be created: {e}")
+        st.stop()
+    cache = load_checkpoint(cp_path) if resume_from_cp else {}
+
+    rows: List[Dict] = []
+    texts: List[str] = []
+    filenames: List[str] = []
+    criteria = role_ctx.criteria
+
+    incoming_items = collect_incoming_items(intake_mode, files, link_inputs)
+
+    status = st.empty()
+    st.markdown("#### Progress")
+    progress_bar = st.progress(0.0)
+
+    parsed_items, _, _ = parse_and_dedupe_items(incoming_items, status, progress_bar)
 
     kept_after_parse = len(parsed_items)
-    status.text(f"Парсинг завершён. Источников: {total_items}. После локальной дедупликации: {kept_after_parse}.")
+    status.text(f"Parsing finished. Sources: {len(incoming_items)}. After local dedup: {kept_after_parse}.")
 
     if not parsed_items:
-        st.warning("Нет успешных результатов после парсинга/дедупликации"); st.stop()
+        st.warning("No usable resumes after parsing/dedup"); st.stop()
 
-    # -------- Сброс прогресса перед батчами --------
     progress_bar.progress(0.0)
 
-    # -------- Pass 2: LLM — однорезюмный безопасный проход --------
     total_llm = len(parsed_items)
     for idx, it in enumerate(parsed_items, start=1):
-        status.text(f"LLM {idx}/{total_llm}: {it['name']}")
+        status.text(f"LLM {idx}/{total_llm}: {it.name}")
 
-        if "pack" not in cache.get(it["fh"], {}):
+        if "pack" not in cache.get(it.file_hash, {}):
             try:
                 pack = client.score_and_extract_single(
-                    resume={"id": it["fh"], "text": it["text"]},
-                    role_desc=role_desc or job_title,
+                    resume={"id": it.id, "text": it.text},
+                    role_desc=role_ctx.description,
                     criteria=criteria,
-                    job_title=job_title,
                 )
             except Exception as e:
-                st.error(f"Ошибка LLM на {it['name']}: {e}")
+                st.error(f"LLM error on {it.name}: {e}")
                 pack = {}
 
-            obj = cache.get(it["fh"], {})
+            obj = cache.get(it.file_hash, {})
             obj["pack"] = {
-                "id": it["fh"],
+                "id": it.id,
                 "full_name": "",
                 "specialization_main": "",
                 "specialization_alt": [],
@@ -1020,12 +1014,11 @@ if run:
                 "reasoning": {},
                 **(pack or {}),
             }
-            cache[it["fh"]] = obj
-            append_checkpoint(cp_path, it["fh"], obj)
+            cache[it.file_hash] = obj
+            append_checkpoint(cp_path, it.file_hash, obj)
 
-        # сбор строк (ФИО — из LLM, если оно есть; приоритетным подсказкам из Excel даём второй шанс)
-        cobj = cache[it["fh"]]["pack"]
-        text = it["text"]
+        cobj = cache[it.file_hash]["pack"]
+        text = it.text
 
         emails_all = list(cobj.get("emails") or []) or EMAIL_RE.findall(text)
         phones_all = list(cobj.get("phones") or []) or PHONE_CAND_RE.findall(text)
@@ -1033,9 +1026,7 @@ if run:
         phone_final = best_phone(phones_all)
 
         fio_llm = (cobj.get("full_name") or "").strip()
-        fio_excel = (it.get("excel_fio") or "").strip()
-        # Приоритет: LLM -> Excel -> эвристика
-        fio_val = fio_llm if fio_llm else (fio_excel if fio_excel else guess_fio(text))
+        fio_val = fio_llm if fio_llm else guess_full_name(text)
 
         specialization = (cobj.get("specialization_main") or "").strip()
         if not specialization:
@@ -1048,26 +1039,26 @@ if run:
 
         score_map = {k: float(cobj.get("scores", {}).get(k, 0.0)) for k in [c.name for c in criteria]}
         base = {
-            "Файл": it["name"],
-            "ФИО": fio_val,
-            "Специализация": specialization,
+            "File": it.name,
+            "FullName": fio_val,
+            "Specialization": specialization,
             "Email": email_final,
             "Phone": phone_final,
             "FullText": text,
-            "SourceURL": it.get("url", ""),
-            "_FileHash": it["fh"], "_TextHash": it["th"],
+            "SourceURL": it.url,
+            "_FileHash": it.file_hash, "_TextHash": it.text_hash,
             "_Reasoning": cobj.get("reasoning", {}),
         }
         for c in criteria:
             base[f"{c.name} (0-5)"] = score_map.get(c.name, 0.0)
 
         rows.append(base)
-        texts.append(text); filenames.append(it["name"])
+        texts.append(text); filenames.append(it.name)
 
         progress_bar.progress(idx/total_llm)
 
     if not rows:
-        st.warning("Нет успешных результатов после LLM"); st.stop()
+        st.warning("No successful LLM results"); st.stop()
 
     # -------- Pass 3: similarity + email/phone duplicate removal --------
     sim_max, sim_near, pairs_df = max_similarities(texts, filenames)
@@ -1094,7 +1085,7 @@ if run:
             else: by_phone[p] = i
 
     if not pairs_df.empty:
-        name_to_idx = {rows[i]["Файл"]: i for i in range(len(rows))}
+        name_to_idx = {rows[i]["File"]: i for i in range(len(rows))}
         for _, r in pairs_df.iterrows():
             a, b, s = r["FileA"], r["FileB"], float(r["Similarity"])
             ia, ib = name_to_idx.get(a), name_to_idx.get(b)
@@ -1106,11 +1097,11 @@ if run:
 
     rows = [r for i,r in enumerate(rows) if keep_mask[i]]
 
-    # -------- Таблицы и вывод --------
+    # -------- Tables and export --------
     df = compute_scores_table(rows, criteria, dup_threshold)
 
     show_cols = [
-        "Файл","ФИО","Специализация","Email","Phone",
+        "File","FullName","Specialization","Email","Phone",
         "SourceURL",
         "Coverage","CompositeScore","PriorityBucket","SimilarityMax","NearDuplicateOf","CalcComment"
     ]
@@ -1120,7 +1111,7 @@ if run:
     final_df = final_df.sort_values(["CompositeScore","SimilarityMax"], ascending=[False, False]).reset_index(drop=True)
     final_df["Rank"] = range(1, len(final_df)+1)
 
-    # Листы статистики
+    # Stats sheets
     stats = []
     for c in criteria:
         pcol = f"{c.name}::Pct"
@@ -1137,22 +1128,24 @@ if run:
     similarity_pairs_df = pairs_df.head(200).copy() if add_pairs and not pairs_df.empty else pd.DataFrame(columns=["FileA","FileB","Similarity"])
 
     logic_text = (
-        "Как считалось:\n"
-        "• LLM ставит баллы 0–5 по вашим критериям и даёт пояснения — по одному резюме на запрос, чтобы модели не путали контекст.\n"
-        "• ФИО берётся из LLM, при пустом — из XLSX, дальше простой фолбэк по тексту.\n"
-        "• В каждый запрос уходит описание роли и JSON с навыками/весами — оценки опираются на этот контекст.\n"
-        "• Композит = 0.75×взвешенные перцентили + 0.25×покрытие.\n"
-        "• Дубликаты: одинаковые файлы/тексты, одинаковые email/телефоны удаляются; Similarity ≥ порога помечается как риск.\n"
-        "• Комментарий содержит ФИО/специализацию, топ-3 сильных с выдержками, пробелы (низкие баллы) и риски."
+        "How scores are produced:\n"
+        "• LLM scores 0–5 per criterion with reasoning — one resume per request to avoid cross-talk.\n"
+        "• Full name comes from the LLM with a light text heuristic fallback.\n"
+        "• Each request includes the role description and the criteria table (sent as JSON) — scores rely on this context.\n"
+        "• Composite = 0.75×weighted percentiles + 0.25×coverage.\n"
+        "• Duplicates: identical files/texts and repeated email/phone are dropped; Similarity ≥ threshold is flagged as risk.\n"
+        "• Comment includes name/specialization, top strengths with excerpts, gaps (low scores), and risks."
     )
     config_df = pd.DataFrame({
         "Key":[
-            "Model","JobTitle","DuplicateThreshold","CheckpointFile",
+            "Model","RoleDescription","DuplicateThreshold","CheckpointFile",
             "TotalUploaded","KeptAfterLocalDedup","BatchSize","NumBatches","HumanLogic"
         ],
         "Value":[
-            model_name, job_title, str(dup_threshold), cp_path,
-            str(len(files) + len(link_rows)), str(len(parsed_items)), "1 (no batching)", str(len(parsed_items)), logic_text
+            model_name,
+            role_desc.strip()[:160] + ("…" if len(role_desc.strip()) > 160 else ""),
+            str(dup_threshold), cp_path,
+            str(total_items), str(len(parsed_items)), "1 (no batching)", str(len(parsed_items)), logic_text
         ]
     })
 
@@ -1251,16 +1244,16 @@ if run:
     try:
         if save_path:
             with open(save_path, "wb") as f: f.write(data)
-            st.success(f"Файл сохранён: {save_path}")
+            st.success(f"Saved on server: {save_path}")
     except Exception as e:
-        st.warning(f"Не удалось сохранить на сервере: {e}")
+        st.warning(f"Could not save on server: {e}")
 
     # Download
-    st.download_button("⬇️ Скачать XLSX", data=data,
+    st.download_button("⬇️ Download XLSX", data=data,
                        file_name=os.path.basename(save_path) or "resume_ranking.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # Footer branding
 st.markdown("---")
-st.caption("© Lola, Liza & Partners LLC — 🗑️ clean_the_garbage.exe")
+st.caption("© 🍵 Matchya — Hire faster")
 

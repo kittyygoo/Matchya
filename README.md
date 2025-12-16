@@ -1,14 +1,13 @@
-# HR Assistant — resume ranking toolkit
+# 🍵 Matchya — Hire faster
 
-A pragmatic Streamlit app that prioritises CVs with an LLM, smart de-duplication, and a polished Excel export. The code is structured to be portfolio-ready and easy to extend. Added OpenRouter support, live model pickers, and mandatory role context with AI-generated skill weights.
+Matchya is a portfolio-grade Streamlit app for ranking resumes with OpenAI-compatible LLMs. It keeps every run reproducible, resilient, and audit-friendly while staying simple enough to demo. The entire experience is English-only and tuned to look and feel like a polished startup tool.
 
-## Highlights (EN)
-- **Flexible LLMs**: OpenAI, OpenRouter, local **LM Studio**, or any custom OpenAI-compatible base URL — model lists are auto-fetched per provider (LM Studio works with `http://localhost:1234` _or_ `http://localhost:1234/v1`).
-- **Mandatory context**: role description + key skills with weights are required; click “⚡️ Generate” to auto-build skills/keywords from the description.
-- **Multiple intake paths**: upload local files, point to a server directory (even without uploads), or feed an Excel file with links (plus optional names).
-- **Interference-proof scoring**: one request per resume (no batching) with role context and weighted criteria, so models don’t mix candidates.
-- **Human-readable output**: tidy XLSX with borders, conditional formatting, priority buckets, and a commentary column.
-- **Resilience**: hashing-based checkpoints, duplicate pruning by hash/contacts/similarity, and graceful fallbacks for names.
+## Why Matchya
+- **Provider agility** — OpenAI, OpenRouter, LM Studio, or any OpenAI-compatible endpoint with live model discovery for each provider.
+- **Resume intake your way** — pick one path explicitly: upload files or paste cloud links. Inputs remain hidden until you choose.
+- **Context-first scoring** — vacancy description and a friendly criteria table are mandatory; one click can auto-draft the rows from the description.
+- **Per-resume isolation** — one request per resume to avoid model cross-talk, plus strong deduplication by hash, contacts, and similarity.
+- **Ready-to-share output** — styled Excel export with ranks, risk flags, reasoning, and similarity pairs for audits.
 
 ## Quick start
 1. Install dependencies:
@@ -17,61 +16,42 @@ A pragmatic Streamlit app that prioritises CVs with an LLM, smart de-duplication
    ```
 2. Run the app:
    ```bash
-   streamlit run app.py
+   streamlit run app_requests.py
    ```
-3. Open the UI (defaults to `http://localhost:85948` when launched via `start_app.py`).
+   (Or `python start_app.py` to pick an open port automatically.)
+3. Open the Streamlit URL printed in the terminal.
 
 ## LLM configuration
-- **OpenAI cloud**: select "OpenAI (облако)" and provide your API key.
-- **OpenRouter**: choose "OpenRouter (облако)" and provide your OpenRouter API key; models are pulled automatically.
-- **LM Studio (local)**: choose "LM Studio (локально)". Leave the key blank to auto-use `lm-studio`; base URL can be `http://localhost:1234` or `http://localhost:1234/v1` — the app tries both when fetching models.
-- **Custom endpoint**: pick "Custom base_url" and set any OpenAI-compatible base URL plus token.
-  - Model dropdowns fetch available IDs via API (`/models` for LM Studio) and fall back to safe defaults.
+- **OpenAI (cloud)**: select the provider, add your API key, and pick a model from the auto-fetched list.
+- **OpenRouter (cloud)**: enter your OpenRouter key; models are fetched live with polite default headers.
+- **LM Studio (local)**: works with `http://localhost:1234` or `http://localhost:1234/v1`; leave the key blank to auto-use `lm-studio`. Models are pulled via `/v1/models` with fallback to `/models`.
+- **Custom base_url**: point to any OpenAI-compatible endpoint, provide the base URL and token, and choose from the discovered models or defaults.
 
 ## Feeding resumes
-- **Upload**: drop PDF/DOCX/TXT/MD/RTF files directly into the uploader.
-- **Server directory**: specify a folder path on the server and optionally include subfolders—handy for bulk drops.
-- **Excel with links**: supply an `.xlsx` file containing URLs; optional columns for candidate names will be picked up automatically and merged with LLM guesses.
+Choose **one** intake mode (the inputs stay hidden until selected):
+- **Upload files**: PDF, DOCX, TXT, MD, or RTF directly in the browser.
+- **Cloud links**: paste one URL per line (direct file links or HTML resume pages). Matchya downloads and normalizes the files for you.
 
-## Export & checkpoints
-- The app writes a richly formatted XLSX (ranking, stats, similarity pairs, config).
-- Checkpoints are stored as JSONL keyed by SHA-1, so you can safely resume long runs.
-- Skill weights are passed to the LLM as JSON together with the vacancy description, so every batch is judged against explicit expectations.
+## Role context & criteria
+- Provide a **role/vacancy description** (required).
+- Enter key skills/criteria in the editable table (`Criterion`, `Weight`, `Keywords`). Add rows, reorder, or tweak values inline.
+- Use **⚡️ Generate skills** to let the LLM propose a weighted criteria list based on the description; edit as needed.
 
----
+## How scoring works
+- **Isolation first**: each resume is scored in its own LLM call with the description and the criteria table included every time.
+- **Signals extracted**: full name, specialization, emails, phones, scores per criterion, and reasoning per criterion.
+- **Composite score**: `0.75 × weighted percentiles + 0.25 × coverage` (coverage = share of criteria with >0 scores).
+- **Duplicate defense**: hashes for files and normalized text, plus email/phone and similarity pruning based on your threshold.
+- **Comments**: Matchya writes human-friendly summaries with strengths, examples, gaps, and risk flags.
 
-# HR Assistant — ранжирование резюме
+## Output
+- **Excel**: ranked candidates with conditional formatting, borders, priority buckets, and optional similarity pairs (top 200).
+- **Checkpoint**: JSONL keyed by SHA-1 to safely resume long runs without re-scoring processed resumes.
+- **Config sheet**: model, provider, thresholds, and criteria weights for transparency.
 
-Портфолио-готовое приложение на Streamlit: LLM-оценка резюме, аккуратный XLSX и продуманная дедупликация. Теперь есть OpenRouter, авто-выбор моделей и обязательный контекст вакансии с AI-генерацией навыков.
+## Pro tips
+- Keep LM Studio running before you fetch models; both `/v1/models` and `/models` are tried automatically.
+- Use the cloud-links mode for large batches of public resumes; the uploader is ideal for handpicked files.
+- Treat the criteria table as weights: higher `weight` means a bigger influence on ranking, while `keywords` help the LLM stay on-topic.
 
-## Ключевые плюсы (RU)
-- **Гибкие модели**: OpenAI, OpenRouter, локальный **LM Studio** или любой OpenAI-совместимый endpoint; список моделей тянется через API (LM Studio понимает и `http://localhost:1234`, и `http://localhost:1234/v1`).
-- **Любые источники резюме**: загрузка файлов, чтение с сервера из директории (даже без загрузок), либо XLSX со ссылками и ФИО.
-- **LLM парсит ФИО и контакты**: имя подтягиваем из модели, но при необходимости дополняем подсказками из XLSX или локальной эвристикой.
-- **Без смешения**: один запрос = одно резюме, критерии с весами и контекст вакансии; кнопку “⚡️ Сгенерировать” можно нажать, чтобы собрать навыки из описания.
-- **Красивый экспорт**: форматирование, data bars, приоритетные бакеты, поясняющие комментарии.
-- **Надёжность**: чекпоинты по SHA-1, фильтрация дубликатов по хешам/контактам/похожести, фолбэки для ФИО (если модель не уверена).
-
-## Быстрый старт
-1. Установите зависимости (см. блок выше).
-2. Запустите `streamlit run app.py` (или `python start_app.py` для автоконфига порта/браузера).
-3. Откройте UI и выберите провайдера LLM.
-
-## Настройка LLM
-- **OpenAI** — введите API key.
-- **OpenRouter** — введите OpenRouter API key; список моделей подтянется автоматически.
-- **LM Studio** — можете оставить ключ пустым, base URL может быть `http://localhost:1234` или `http://localhost:1234/v1`; список моделей берётся из `/models`, пробуем оба варианта.
-- **Custom** — впишите свой OpenAI-совместимый base URL и токен.
-  - Выпадающие списки моделей используют данные API, при ошибке остаются дефолтные варианты.
-
-## Откуда брать резюме
-- Загрузите файлы (PDF/DOCX/TXT/MD/RTF) через UI.
-- Укажите путь к директории на сервере и, при желании, захватите подпапки — можно работать и без загрузок.
-- Добавьте XLSX со ссылками; колонку с ФИО можно подсказать, но авто-эвристика тоже работает и объединяется с LLM-результатом.
-
-## Экспорт и возобновление
-- XLSX сохраняется на сервере и доступен для скачивания прямо в браузере.
-- Чекпоинты в JSONL позволяют безопасно перезапускать процесс без повторных запросов к LLM.
-- Весовые навыки в JSON уходят в запрос к LLM вместе с описанием роли, так что каждая пачка оценивается против явных ожиданий.
-
-Удачи в подборе идеальных кандидатов — этот инструмент создан, чтобы экономить время и выглядеть профессионально.
+Enjoy faster, clearer hiring workflows with **🍵 Matchya**.
