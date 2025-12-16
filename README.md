@@ -24,7 +24,7 @@ Just zoomed version for you to see what is going on.
 
 - 🩻 **Clean, actionable results** — Clear, structured output with explanations and formatting, designed for fast HR decision-making.
 
-- 🤑 **Cost savings** — Processing 10, 100, or 1,000 résumés with Matchya costs up to 10× less than manual work.
+- 🤑 **Cost savings** — Processing 10, 100, or 1,000 résumés with Matchya costs up to 10,000× less than manual work.
 
 ## UI
 
