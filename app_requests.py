@@ -715,14 +715,6 @@ with st.sidebar:
     if crit_state_key not in st.session_state:
         st.session_state[crit_state_key] = json.dumps(default_criteria, ensure_ascii=False, indent=2)
 
-    crit_cols = st.columns([3, 1])
-    crit_json = crit_cols[0].text_area(
-        "Список навыков/критериев (JSON)",
-        key=crit_state_key,
-        height=240,
-        help="Каждый объект: name, weight, keywords[]. Вес — важность критерия."
-    )
-
     def _generate_criteria():
         if not role_desc.strip():
             st.error("Сначала добавьте описание роли — по нему будем генерировать навыки")
@@ -738,15 +730,26 @@ with st.sidebar:
                 ensure_ascii=False,
                 indent=2,
             )
-            st.success("Навыки сгенерированы и подставлены ниже")
+            st.session_state["criteria_generated_ok"] = True
         except Exception as e:
             st.error(f"Не удалось сгенерировать навыки: {e}")
 
+    crit_cols = st.columns([3, 1])
     with crit_cols[1]:
         st.markdown(" ")
         st.markdown(" ")
         if st.button("⚡️ Сгенерировать навыки", use_container_width=True):
             _generate_criteria()
+
+    crit_json = crit_cols[0].text_area(
+        "Список навыков/критериев (JSON)",
+        key=crit_state_key,
+        height=240,
+        help="Каждый объект: name, weight, keywords[]. Вес — важность критерия.",
+    )
+
+    if st.session_state.pop("criteria_generated_ok", False):
+        st.success("Навыки сгенерированы и подставлены ниже")
 
     criteria: List[Criterion] = []
     try:
