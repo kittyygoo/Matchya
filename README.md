@@ -3,7 +3,7 @@
 A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-duplication, and a polished Excel export. The code is structured to be portfolio-ready and easy to extend. Added OpenRouter support, live model pickers, and mandatory role context with AI-generated skill weights.
 
 ## Highlights (EN)
-- **Flexible LLMs**: OpenAI, OpenRouter, local **LM Studio**, or any custom OpenAI-compatible base URL — model lists are auto-fetched per provider.
+- **Flexible LLMs**: OpenAI, OpenRouter, local **LM Studio**, or any custom OpenAI-compatible base URL — model lists are auto-fetched per provider (LM Studio works with `http://localhost:1234` _or_ `http://localhost:1234/v1`).
 - **Mandatory context**: role description + key skills with weights are required; click “⚡️ Generate” to auto-build skills/keywords from the description.
 - **Multiple intake paths**: upload local files, point to a server directory (even without uploads), or feed an Excel file with links (plus optional names).
 - **Batch-grade scoring**: one request per batch (up to 5 CVs) with role context and weighted criteria.
@@ -24,14 +24,14 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 ## LLM configuration
 - **OpenAI cloud**: select "OpenAI (облако)" and provide your API key.
 - **OpenRouter**: choose "OpenRouter (облако)" and provide your OpenRouter API key; models are pulled automatically.
-- **LM Studio (local)**: choose "LM Studio (локально)". Leave the key blank to auto-use `lm-studio`; default base URL is `http://localhost:1234/v1`.
+- **LM Studio (local)**: choose "LM Studio (локально)". Leave the key blank to auto-use `lm-studio`; base URL can be `http://localhost:1234` or `http://localhost:1234/v1` — the app tries both when fetching models.
 - **Custom endpoint**: pick "Custom base_url" and set any OpenAI-compatible base URL plus token.
   - Model dropdowns fetch available IDs via API (`/models` for LM Studio) and fall back to safe defaults.
 
 ## Feeding resumes
 - **Upload**: drop PDF/DOCX/TXT/MD/RTF files directly into the uploader.
 - **Server directory**: specify a folder path on the server and optionally include subfolders—handy for bulk drops.
-- **Excel with links**: supply an `.xlsx` file containing URLs; optional columns for candidate names will be picked up automatically.
+- **Excel with links**: supply an `.xlsx` file containing URLs; optional columns for candidate names will be picked up automatically and merged with LLM guesses.
 
 ## Export & checkpoints
 - The app writes a richly formatted XLSX (ranking, stats, similarity pairs, config).
@@ -45,11 +45,12 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 Портфолио-готовое приложение на Streamlit: один LLM-запрос на батч резюме, аккуратный XLSX и продуманная дедупликация. Теперь есть OpenRouter, авто-выбор моделей и обязательный контекст вакансии с AI-генерацией навыков.
 
 ## Ключевые плюсы (RU)
-- **Гибкие модели**: OpenAI, OpenRouter, локальный **LM Studio** или любой OpenAI-совместимый endpoint; список моделей тянется через API.
+- **Гибкие модели**: OpenAI, OpenRouter, локальный **LM Studio** или любой OpenAI-совместимый endpoint; список моделей тянется через API (LM Studio понимает и `http://localhost:1234`, и `http://localhost:1234/v1`).
 - **Любые источники резюме**: загрузка файлов, чтение с сервера из директории (даже без загрузок), либо XLSX со ссылками и ФИО.
+- **LLM парсит ФИО и контакты**: имя подтягиваем из модели, но при необходимости дополняем подсказками из XLSX или локальной эвристикой.
 - **Оценка за раз**: до 5 резюме в одном запросе, критерии с весами и контекст вакансии; кнопку “⚡️ Сгенерировать” можно нажать, чтобы собрать навыки из описания.
 - **Красивый экспорт**: форматирование, data bars, приоритетные бакеты, поясняющие комментарии.
-- **Надёжность**: чекпоинты по SHA-1, фильтрация дубликатов по хешам/контактам/похожести, фолбэки для ФИО.
+- **Надёжность**: чекпоинты по SHA-1, фильтрация дубликатов по хешам/контактам/похожести, фолбэки для ФИО (если модель не уверена).
 
 ## Быстрый старт
 1. Установите зависимости (см. блок выше).
@@ -59,14 +60,14 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 ## Настройка LLM
 - **OpenAI** — введите API key.
 - **OpenRouter** — введите OpenRouter API key; список моделей подтянется автоматически.
-- **LM Studio** — можете оставить ключ пустым, base URL по умолчанию `http://localhost:1234/v1`; список моделей берётся из `/models`.
+- **LM Studio** — можете оставить ключ пустым, base URL может быть `http://localhost:1234` или `http://localhost:1234/v1`; список моделей берётся из `/models`, пробуем оба варианта.
 - **Custom** — впишите свой OpenAI-совместимый base URL и токен.
   - Выпадающие списки моделей используют данные API, при ошибке остаются дефолтные варианты.
 
 ## Откуда брать резюме
 - Загрузите файлы (PDF/DOCX/TXT/MD/RTF) через UI.
 - Укажите путь к директории на сервере и, при желании, захватите подпапки — можно работать и без загрузок.
-- Добавьте XLSX со ссылками; колонку с ФИО можно подсказать, но авто-эвристика тоже работает.
+- Добавьте XLSX со ссылками; колонку с ФИО можно подсказать, но авто-эвристика тоже работает и объединяется с LLM-результатом.
 
 ## Экспорт и возобновление
 - XLSX сохраняется на сервере и доступен для скачивания прямо в браузере.
