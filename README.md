@@ -1,13 +1,24 @@
 # 🍵 Matchya — Hire faster
 
-Matchya is a portfolio-grade Streamlit app for ranking resumes with OpenAI-compatible LLMs. It keeps every run reproducible, resilient, and audit-friendly while staying simple enough to demo. The entire experience is English-only and tuned to look and feel like a polished startup tool.
+**Matchya** is an application for screening candidates in a super fast and simple format.
+Need to process 10 or 100 or even 1,000 résumés? Save your time—press a couple of buttons and get an unbiased, easy-to-read result.
+
+## Easy-to-get output
+---
+![Abstract](examples/Screenshot 2025-12-16 at 22.34.57.png)
+---
+![Detailed](examples/Screenshot 2025-12-16 at 22.35.42.png)
 
 ## Why Matchya
-- **Provider agility** — OpenAI, OpenRouter, LM Studio, or any OpenAI-compatible endpoint with live model discovery for each provider.
-- **Resume intake your way** — pick one path explicitly: upload files or paste cloud links. Inputs remain hidden until you choose.
-- **Context-first scoring** — vacancy description and a friendly criteria table are mandatory; one click can auto-draft the rows from the description.
-- **Per-resume isolation** — one request per resume to avoid model cross-talk, plus strong deduplication by hash, contacts, and similarity.
-- **Ready-to-share output** — styled Excel export with ranks, risk flags, reasoning, and similarity pairs for audits.
+- ⏱️ **Time efficiency** — Instead of manual screening or blunt keyword filtering, delegate candidate selection to Matchya. Focus only on high-quality candidates that truly fit.
+
+- 🤟 **Ease of use** — A few clicks, a short wait, and the results are ready.
+
+- 🤸 **Flexibility** — Customize evaluation criteria to your needs. Don’t want to define them yourself? Matchya can do it for you.
+
+- 🩻 **Clean, actionable results** — Clear, structured output with explanations and formatting, designed for fast HR decision-making.
+
+- 🤑 **Cost savings** — Processing 10, 100, or 1,000 résumés with Matchya costs up to 10× less than manual work.
 
 ## Quick start
 1. Install dependencies:
@@ -20,10 +31,11 @@ Matchya is a portfolio-grade Streamlit app for ranking resumes with OpenAI-compa
    ```
    (Or `python start_app.py` to pick an open port automatically.)
 3. Open the Streamlit URL printed in the terminal.
+4. Enjoy Matchya ✌️
 
 ## Code structure
 - `app.py`: Streamlit UI orchestrator.
-- `matchya/`: production-style modules for LLM clients, intake, scoring, similarity, checkpoints, and text helpers.
+- `matchya/`: modules for LLM clients, intake, scoring, similarity, checkpoints, and text helpers.
 - `app_requests.py`: tiny shim for backward compatibility with the old entrypoint.
 
 ## LLM configuration
@@ -47,7 +59,7 @@ Choose **one** intake mode (the inputs stay hidden until selected):
 - **Signals extracted**: full name, specialization, emails, phones, scores per criterion, and reasoning per criterion.
 - **Composite score**: `0.75 × weighted percentiles + 0.25 × coverage` (coverage = share of criteria with >0 scores).
 - **Duplicate defense**: hashes for files and normalized text, plus email/phone and similarity pruning based on your threshold.
-- **Comments**: Matchya writes human-friendly summaries with strengths, examples, gaps, and risk flags.
+- **Comments**: Matchya writes easy-to-get summaries with strengths, examples, gaps, and risk flags.
 
 ## Output
 - **Excel**: ranked candidates with conditional formatting, borders, priority buckets, and optional similarity pairs (top 200).
@@ -60,3 +72,7 @@ Choose **one** intake mode (the inputs stay hidden until selected):
 - Treat the criteria table as weights: higher `weight` means a bigger influence on ranking, while `keywords` help the LLM stay on-topic.
 
 Enjoy faster, clearer hiring workflows with **🍵 Matchya**.
+
+## Authors
+- Liza Kalinina [@kittyygoo](https://github.com/kittyygoo)
+- Nikita Prudnikov [@prudnik-web](https://github.com/prudnik-web)

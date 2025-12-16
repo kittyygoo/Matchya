@@ -1,5 +1,5 @@
 """
-🍵 Matchya — Resume Ranker (portfolio-ready)
+🍵 Matchya — Resume Ranker
 
 Features:
 - OpenAI-compatible LLMs (OpenAI, OpenRouter, LM Studio, custom) extract the main role, full name, contacts, and scores per
