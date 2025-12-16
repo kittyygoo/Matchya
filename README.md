@@ -31,7 +31,7 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 ## Feeding resumes
 - **Upload**: drop PDF/DOCX/TXT/MD/RTF files directly into the uploader.
 - **Server directory**: specify a folder path on the server and optionally include subfolders—handy for bulk drops.
-- **Excel with links**: supply an `.xlsx` file containing URLs; optional columns for candidate names will be picked up automatically.
+- **Excel with links**: supply an `.xlsx` file containing URLs; optional columns for candidate names will be picked up automatically and merged with LLM guesses.
 
 ## Export & checkpoints
 - The app writes a richly formatted XLSX (ranking, stats, similarity pairs, config).
@@ -47,9 +47,10 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 ## Ключевые плюсы (RU)
 - **Гибкие модели**: OpenAI, OpenRouter, локальный **LM Studio** или любой OpenAI-совместимый endpoint; список моделей тянется через API (LM Studio понимает и `http://localhost:1234`, и `http://localhost:1234/v1`).
 - **Любые источники резюме**: загрузка файлов, чтение с сервера из директории (даже без загрузок), либо XLSX со ссылками и ФИО.
+- **LLM парсит ФИО и контакты**: имя подтягиваем из модели, но при необходимости дополняем подсказками из XLSX или локальной эвристикой.
 - **Оценка за раз**: до 5 резюме в одном запросе, критерии с весами и контекст вакансии; кнопку “⚡️ Сгенерировать” можно нажать, чтобы собрать навыки из описания.
 - **Красивый экспорт**: форматирование, data bars, приоритетные бакеты, поясняющие комментарии.
-- **Надёжность**: чекпоинты по SHA-1, фильтрация дубликатов по хешам/контактам/похожести, фолбэки для ФИО.
+- **Надёжность**: чекпоинты по SHA-1, фильтрация дубликатов по хешам/контактам/похожести, фолбэки для ФИО (если модель не уверена).
 
 ## Быстрый старт
 1. Установите зависимости (см. блок выше).
@@ -66,7 +67,7 @@ A pragmatic Streamlit app that prioritises CVs with a single LLM pass, smart de-
 ## Откуда брать резюме
 - Загрузите файлы (PDF/DOCX/TXT/MD/RTF) через UI.
 - Укажите путь к директории на сервере и, при желании, захватите подпапки — можно работать и без загрузок.
-- Добавьте XLSX со ссылками; колонку с ФИО можно подсказать, но авто-эвристика тоже работает.
+- Добавьте XLSX со ссылками; колонку с ФИО можно подсказать, но авто-эвристика тоже работает и объединяется с LLM-результатом.
 
 ## Экспорт и возобновление
 - XLSX сохраняется на сервере и доступен для скачивания прямо в браузере.

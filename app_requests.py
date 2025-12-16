@@ -3,9 +3,8 @@
 Company: Lola, Liza & Partners LLC
 
 Функции:
-- LLM (OpenAI, по умолчанию gpt-4o-mini) извлекает специализацию (+альтернативы), контакты,
+- LLM (OpenAI, по умолчанию gpt-4o-mini) извлекает специализацию, ФИО (+альтернативы по специализациям), контакты,
   оценивает по критериям 0–5 и даёт краткие пояснения — ВСЁ за один батч-запрос (до 5 резюме).
-- ФИО НЕ берём из LLM: подставляется из XLSX со ссылками (если присутствует); при отсутствии — простой фолбэк из текста.
 - Устойчивый композитный скоринг: 0.75*wP(перцентили) + 0.25*Coverage.
 - Жёсткая дедупликация: одинаковые файлы/тексты, одинаковые email/телефоны, Similarity >= порога (100% — всегда дубликат).
 - Выгрузка ТОЛЬКО в XLSX. Бордеры, жирные заголовки, шкалы, подсветка строк по бакетам/рискам.
@@ -418,9 +417,9 @@ class LLMClient:
         system = (
             "Ты — ассистент HR. Для КАЖДОГО резюме из списка:\n"
             "1) Извлеки специализацию: 'specialization_main' (до 80 символов) и до 3 альтернатив.\n"
-            "2) Извлеки контакты: 'emails' и 'phones' (желательно в международном формате).\n"
-            "3) Оцени по критериям 0..5 и дай краткие, но информативные пояснения по каждому критерию.\n"
-            "ВНИМАНИЕ: ПОЛЕ 'full_name' НЕ ТРЕБУЕТСЯ.\n"
+            "2) Извлеки ФИО кандидата в 'full_name' (если невозможно — оставь пустую строку).\n"
+            "3) Извлеки контакты: 'emails' и 'phones' (желательно в международном формате).\n"
+            "4) Оцени по критериям 0..5 и дай краткие, но информативные пояснения по каждому критерию.\n"
             "Возвращай JSON строго по схеме для всех входов."
         )
         payload = {
@@ -440,6 +439,7 @@ class LLMClient:
                         "type": "object",
                         "properties": {
                             "id": {"type": "string"},
+                            "full_name": {"type": "string"},
                             "specialization_main": {"type": "string"},
                             "specialization_alt": {"type": "array", "items": {"type": "string"}},
                             "emails": {"type": "array", "items": {"type": "string"}},
@@ -965,17 +965,18 @@ if run:
                 else:
                     obj["pack"] = {
                         "id": it["fh"],
+                        "full_name": "",
                         "specialization_main": "",
                         "specialization_alt": [],
                         "emails": [],
                         "phones": [],
                         "scores": {},
-                        "reasoning": {}
+                        "reasoning": {},
                     }
                 cache[it["fh"]] = obj
                 append_checkpoint(cp_path, it["fh"], obj)
 
-        # сбор строк (ФИО — из XLSX, НЕ из LLM)
+        # сбор строк (ФИО — из LLM, если оно есть; приоритетным подсказкам из Excel даём второй шанс)
         for it in batch:
             cobj = cache[it["fh"]]["pack"]
             text = it["text"]
@@ -985,9 +986,10 @@ if run:
             email_final = emails_all[0] if emails_all else ""
             phone_final = best_phone(phones_all)
 
-            # Приоритет: ФИО из Excel -> фолбэк из текста
+            fio_llm = (cobj.get("full_name") or "").strip()
             fio_excel = (it.get("excel_fio") or "").strip()
-            fio_val = fio_excel if fio_excel else guess_fio(text)
+            # Приоритет: LLM -> Excel -> эвристика
+            fio_val = fio_llm if fio_llm else (fio_excel if fio_excel else guess_fio(text))
 
             specialization = (cobj.get("specialization_main") or "").strip()
             if not specialization:
@@ -1095,7 +1097,7 @@ if run:
         "• В каждый запрос уходит описание роли и JSON с навыками/весами — оценки опираются на этот контекст.\n"
         "• Композит = 0.75×взвешенные перцентили + 0.25×покрытие.\n"
         "• Дубликаты: одинаковые файлы/тексты, одинаковые email/телефоны удаляются; Similarity ≥ порога помечается как риск.\n"
-        "• Комментарий содержит ФИО/специализацию, топ-3 сильных с выдержками, пробелы (низкие баллы) и риски."
+        "• Комментарий содержит ФИО/специализацию (ФИО берём из LLM, если оно есть), топ-3 сильных с выдержками, пробелы (низкие баллы) и риски."
     )
     config_df = pd.DataFrame({
         "Key":[
