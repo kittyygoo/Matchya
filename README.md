@@ -5,11 +5,14 @@ Need to process 10 or 100 or even 1,000 résumés? Save your time—press a coup
 
 ## Easy-to-get output
 
----
 ![Abstract](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2022.34.57.png)
+
 See? All candidates were graded and sorted—for you to easily process the top ones.
+
 ---
+
 ![Detailed](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2022.35.42.png)
+
 Just zoomed version for you to see what is going on.
 
 ## Why Matchya
@@ -25,9 +28,10 @@ Just zoomed version for you to see what is going on.
 
 ## UI
 
----
 ![pic](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2023.52.31.png)
+
 ---
+
 ![pic](https://github.com/kittyygoo/Matchya/blob/main/examples/Screenshot%202025-12-16%20at%2023.52.53.png)
 
 ## Quick start
